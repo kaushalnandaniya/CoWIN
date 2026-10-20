@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IT457 Cloud Computing - Week 1 Case Study Summary: CoWIN</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #1e3a8a;
+      --primary-light: #2563eb;
+      --primary-subtle: #eff6ff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --border-color: #cbd5e1;
+      --bg-card: #ffffff;
+      --bg-accent: #f8fafc;
+      --tag-bg: #e0e7ff;
+      --tag-text: #3730a3;
+      --metric-bg: #f0fdf4;
+      --metric-border: #86efac;
+      --metric-text: #166534;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    @page {
+      size: A4 portrait;
+      margin: 8mm 9mm;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--text-main);
+      background-color: #ffffff;
+      line-height: 1.32;
+      font-size: 10px;
+      padding: 0;
+    }
+
+    .page-container {
+      width: 100%;
+      margin: 0 auto;
+      background: var(--bg-card);
+    }
+
+    /* Header styling */
+    .header {
+      border-bottom: 2px solid var(--primary);
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+
+    .course-badge {
+      display: inline-block;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      padding: 2px 7px;
+      border-radius: 3px;
+      margin-bottom: 3px;
+    }
+
+    .title {
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--primary);
+      line-height: 1.2;
+      letter-spacing: -0.2px;
+    }
+
+    .subtitle {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-top: 1px;
+    }
+
+    .meta-box {
+      text-align: right;
+      font-size: 9.5px;
+      color: var(--text-muted);
+      background: var(--bg-accent);
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      line-height: 1.35;
+    }
+
+    .meta-box strong {
+      color: var(--text-main);
+    }
+
+    /* Metric Counters */
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 7px;
+    }
+
+    .metric-item {
+      background: var(--metric-bg);
+      border: 1px solid var(--metric-border);
+      border-radius: 4px;
+      padding: 4px 6px;
+      text-align: center;
+    }
+
+    .metric-value {
+      font-size: 13.5px;
+      font-weight: 800;
+      color: var(--metric-text);
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1.1;
+    }
+
+    .metric-label {
+      font-size: 8.5px;
+      font-weight: 600;
+      color: #14532d;
+      margin-top: 1px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    /* Section Titles */
+    .section-title {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--primary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1.5px solid var(--primary-light);
+      padding-bottom: 2px;
+      margin: 7px 0 5px 0;
+    }
+
+    .two-col-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .card {
+      background: var(--bg-accent);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 6px 8px;
+    }
+
+    .card-title {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--primary);
+      margin-bottom: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.2px;
+    }
+
+    ul.compact-list {
+      list-style-type: disc;
+      padding-left: 14px;
+    }
+
+    ul.compact-list li {
+      margin-bottom: 2.5px;
+      font-size: 9.2px;
+      line-height: 1.28;
+      color: #1e293b;
+    }
+
+    ul.compact-list li:last-child {
+      margin-bottom: 0;
+    }
+
+    ul.compact-list strong {
+      color: var(--text-main);
+    }
+
+    /* Architecture grid */
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .arch-box {
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 5px 7px;
+      background: #ffffff;
+      border-top: 2.5px solid var(--primary-light);
+    }
+
+    .arch-box h4 {
+      font-size: 9.5px;
+      font-weight: 700;
+      color: var(--primary);
+      margin-bottom: 2px;
+      line-height: 1.2;
+    }
+
+    .arch-box p {
+      font-size: 8.8px;
+      color: #334155;
+      line-height: 1.24;
+    }
+
+    /* Week 3 plan box */
+    .plan-box {
+      background: #fefce8;
+      border: 1px solid #fef08a;
+      border-left: 3px solid #ca8a04;
+      padding: 4px 8px;
+      border-radius: 3px;
+      margin-bottom: 6px;
+      font-size: 8.8px;
+      line-height: 1.25;
+      color: #713f12;
+    }
+
+    .plan-box strong {
+      color: #854d0e;
+    }
+
+    /* Table styling */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 8.8px;
+      line-height: 1.22;
+    }
+
+    .data-table th, .data-table td {
+      border: 1px solid var(--border-color);
+      padding: 3.5px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .data-table th {
+      background: #f1f5f9;
+      font-weight: 700;
+      color: var(--primary);
+      text-transform: uppercase;
+      font-size: 8px;
+      letter-spacing: 0.3px;
+    }
+
+    .data-table tr:nth-child(even) {
+      background: #f8fafc;
+    }
+
+    .source-tag {
+      font-size: 7.5px;
+      font-weight: 700;
+      background: #e2e8f0;
+      color: #1e293b;
+      padding: 1px 4px;
+      border-radius: 2px;
+      display: inline-block;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+
+<div class="page-container">
+
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <span class="course-badge">IT457 Cloud Computing • Case Study Plan</span>
+      <h1 class="title">CoWIN: National-Scale Vaccination Scheduling Cloud Platform</h1>
+      <div class="subtitle">Architectural Extraction, Infrastructure Economics, and Outcome Analysis (Week 1 Checkpoint)</div>
+    </div>
+    <div class="meta-box">
+      <div><strong>Track:</strong> Govt & Public Digital Platforms</div>
+      <div><strong>Scale:</strong> 1.38B Citizens / National Scale</div>
+      <div><strong>Date:</strong> Semester Coursework Checkpoint</div>
+    </div>
+  </div>
+
+  <!-- Metric Banner -->
+  <div class="metrics-bar">
+    <div class="metric-item">
+      <div class="metric-value">2.20B+</div>
+      <div class="metric-label">Doses Certified</div>
+    </div>
+    <div class="metric-item">
+      <div class="metric-value">25.1M</div>
+      <div class="metric-label">Single-Day Peak Record</div>
+    </div>
+    <div class="metric-item">
+      <div class="metric-value">3.2B+</div>
+      <div class="metric-label">Daily Peak API Ingress</div>
+    </div>
+    <div class="metric-item">
+      <div class="metric-value">&lt; 0.3%</div>
+      <div class="metric-label">Platform Cost of Total Outlay</div>
+    </div>
+  </div>
+
+  <!-- Section 1: Salient Points -->
+  <div class="section-title">1. Case Study Salient Points</div>
+
+  <div class="two-col-grid">
+    <!-- Problem & Context -->
+    <div class="card">
+      <div class="card-title">A. Problem Context & Core Scaling Bottlenecks</div>
+      <ul class="compact-list">
+        <li><strong>Thundering-Herd Slot Stampede:</strong> Millions of concurrent citizens queried and reserved slots the instant regional quotas opened, inducing severe DB lock contention and thread starvation.</li>
+        <li><strong>Write-Heavy Mutation Workload:</strong> Required thousands of guaranteed, non-duplicating transactional writes/sec (inventory decrement, vaccinator confirmation) under strict ACID integrity.</li>
+        <li><strong>Inclusivity & Offline Operations:</strong> Supported walk-in assisted registrations across rural centers over 2G/3G networks, issuing tamper-proof credentials without continuous connectivity.</li>
+        <li><strong>Sovereign Data Governance:</strong> Citizen health and ID records strictly localized within sovereign cloud borders, prohibiting data transit outside Indian jurisdiction.</li>
+      </ul>
+    </div>
+
+    <!-- Cost & Infrastructure Economics -->
+    <div class="card">
+      <div class="card-title">B. Cost Data & Infrastructure Economics</div>
+      <ul class="compact-list">
+        <li><strong>Ultra-Frugal Software & Cloud Spend:</strong> Platform engineering and cloud infrastructure cost an estimated <strong>₹50–₹100 Cr (~$7–$13M)</strong>, representing &lt;0.3% of the ₹35,000 Cr vaccine procurement budget.</li>
+        <li><strong>Global Benchmarking Advantage:</strong> Far lower TCO than international systems (UK NHS App >£300M, US CDC VAMS ~$44M). Amortized cost was under <strong>₹0.50 ($0.006) per beneficiary</strong>.</li>
+        <li><strong>Hybrid Cloud Architecture:</strong> Core databases and citizen vaults sit on National Informatics Centre (NIC/MeghRaj) cloud with zero-egress public network tariffs; AWS India provided elastic burst nodes for peak mega-drives.</li>
+        <li><strong>Decentralized Cryptographic Savings:</strong> Digital QR codes with Ed25519 signatures offloaded verification checks to edge verifiers, saving petabytes of central server bandwidth.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Architectural Extraction Grid -->
+  <div style="font-weight: 700; font-size: 9.5px; color: var(--primary); text-transform: uppercase; margin-bottom: 3px; letter-spacing: 0.3px;">C. Extracted Cloud Architecture Blueprint</div>
+  <div class="arch-grid">
+    <div class="arch-box">
+      <h4>Edge & Ingress (Anti-Stampede)</h4>
+      <p>Route 53 Anycast DNS + CloudFront CDN edge PoPs. AWS WAF and API Setu enforce rate-limiting (100 req/5 min/IP) to deflect scrapers and bots from backend origin nodes.</p>
+    </div>
+    <div class="arch-box">
+      <h4>Orchestration & Microservices</h4>
+      <p>Decoupled stateless microservices on Kubernetes (EKS & NIC MeghRaj). Auto-scales dynamically via custom metrics (queue backlog depth and CPU/memory pressure).</p>
+    </div>
+    <div class="arch-box">
+      <h4>Distributed Caching (Concurrency)</h4>
+      <p>Partitioned Redis (ElastiCache) clusters hold district/pincode slot quotas. Atomic Redis operations (<code>DECR</code> / Redlock) absorb high-frequency slot booking bursts prior to DB writes.</p>
+    </div>
+    <div class="arch-box">
+      <h4>Polyglot Persistence Layer</h4>
+      <p>PostgreSQL manages ACID inventory/booking commits; MongoDB/DocumentDB handles flexible citizen profile lookups; ClickHouse powers sub-second real-time admin analytics.</p>
+    </div>
+    <div class="arch-box">
+      <h4>Asynchronous Event Pipelines</h4>
+      <p>Apache Kafka & Amazon SQS event streams decouple write flows: asynchronous OTP dispatch across telecom gateways, vaccination logging, and background PDF certificate generation.</p>
+    </div>
+    <div class="arch-box">
+      <h4>Verification & Open DPG (DIVOC)</h4>
+      <p>Built upon DIVOC & Sunbird RC open standards. W3C-compliant Verifiable Credentials with asymmetric Ed25519 key signing enable instant offline QR validation without central DB hits.</p>
+    </div>
+  </div>
+
+  <!-- Week 3 Plan Alignment -->
+  <div class="plan-box">
+    <strong>Week 3 Exercise Plan Alignment (Govt Platforms Track):</strong> Per the syllabus, we will design a multi-region, high-availability architecture and build a <strong>High-Concurrency Distributed Slot Reservation Engine</strong> replicating CoWIN's concurrency pipeline: containerized microservice behind an ALB, Redis distributed lock manager (atomic inventory decrements), Kafka/RabbitMQ async event buffer, and PostgreSQL transactional persistence. We will evaluate latency and scaling behaviors under simulated thundering-herd loads using Locust/k6.
+  </div>
+
+  <!-- Section 2: Primary Sources Found -->
+  <div class="section-title">2. Primary Sources & Case Study Citations Found</div>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th style="width: 17%;">Category</th>
+        <th style="width: 31%;">Primary Source / Document</th>
+        <th style="width: 25%;">Issuing Body / Author</th>
+        <th style="width: 27%;">Key Technical / Quantitative Insight Extracted</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="source-tag">Government & Specs</span></td>
+        <td><strong>CoWIN Portal & Open API Specifications</strong><br><em>apisetu.gov.in / co-vin.in</em></td>
+        <td>Ministry of Health (MoHFW) & National Health Authority (NHA)</td>
+        <td>Rate-limiting rules, tokenized beneficiary APIs, multi-tenant center queries, walk-in vaccinator sync schemas.</td>
+      </tr>
+      <tr>
+        <td><span class="source-tag">Leadership / Arch</span></td>
+        <td><strong>"CoWIN: Technology Behind World's Largest Vaccination Drive"</strong></td>
+        <td>Dr. R.S. Sharma (CEO, NHA / Head, Empowered Group)</td>
+        <td>Architectural principles: Single source of truth, zero geo-tracking privacy by design, stateless microservices scaling.</td>
+      </tr>
+      <tr>
+        <td><span class="source-tag">Core Engine Code</span></td>
+        <td><strong>DIVOC Open-Source Architecture & Stack</strong><br><em>github.com/egovernments/divoc</em></td>
+        <td>eGovernments Foundation & DPGA</td>
+        <td>Production deployment configs with Keycloak (IdP), Apache Kafka streaming, ClickHouse OLAP, and W3C JSON-LD credentialing.</td>
+      </tr>
+      <tr>
+        <td><span class="source-tag">Cloud Case Study</span></td>
+        <td><strong>"Scaling CoWIN Platform on AWS Cloud"</strong> & Intel Xeon Optimization Brief</td>
+        <td>Amazon Web Services (AWS) & Intel Corporation</td>
+        <td>Kubernetes (EKS) auto-scaling, ElastiCache Redis write optimization, CloudFront CDN edge caching, and cryptographic compute acceleration.</td>
+      </tr>
+      <tr>
+        <td><span class="source-tag">Economics / Policy</span></td>
+        <td><strong>"Stacking Up the Benefits: Lessons from India's Digital Journey"</strong> (WP/23/78)</td>
+        <td>International Monetary Fund (IMF) & World Bank</td>
+        <td>Quantified DPI economics, operational frugality (&lt;0.3% of total vaccination program budget), and Aadhaar/DigiLocker integration.</td>
+      </tr>
+    </tbody>
+  </table>
+
+</div>
+
+</body>
+</html>
