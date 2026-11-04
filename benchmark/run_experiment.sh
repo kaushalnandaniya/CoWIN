@@ -48,3 +48,4 @@ echo "🚀 Executing automated failover benchmark runner..."
 python3 "$DIR/failover_benchmark.py" --url "http://localhost:8080" --duration 32 --rps 10
 
 echo "✅ Experiment completed successfully!"
+

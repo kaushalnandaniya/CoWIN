@@ -14,3 +14,4 @@ EnvironmentFile=-/etc/default/cowin-lookup
 
 [Install]
 WantedBy=multi-user.target
+

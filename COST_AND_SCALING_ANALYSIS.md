@@ -96,3 +96,4 @@ To fulfill the course requirement of evaluating the **national-scale cloud archi
 $$\text{Cost per Certified Citizen} = \frac{\text{Total Cloud Spend over 2 Years (}\approx \text{₹80 Crore)}}{\text{1.02 Billion Beneficiaries}} \approx \mathbf{\text{₹0.78 (\$0.009 USD) per Citizen}}$$
 
 This confirms that CoWIN represents one of the most cost-effective population-scale digital public goods ever deployed globally.
+

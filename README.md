@@ -14,6 +14,7 @@
 
 | Deliverable | Description | Link |
 | :--- | :--- | :--- |
+| **Week 3 Report Add-on (PDF)** | Submission-ready PDF report: Two-zone PoC results, failover metrics, latency percentiles, and disaster recovery analysis. | [WEEK_3_REPORT_ADDON.pdf](WEEK_3_REPORT_ADDON.pdf) |
 | **Week 3 Report Add-on (Markdown)** | Full experimental report: Two-zone PoC results, failover metrics, latency percentiles, and disaster recovery analysis. | [WEEK_3_REPORT_ADDON.md](WEEK_3_REPORT_ADDON.md) |
 | **Week 3 Report Add-on (LaTeX)** | LaTeX source with measurement tables for integration into the final report. | [WEEK_3_REPORT_ADDON.tex](WEEK_3_REPORT_ADDON.tex) |
 | **Cost & Scaling Analysis** | Itemized AWS Mumbai pricing for PoC + National-Scale TCO comparative model (AWS vs NIC MeghRaj). | [COST_AND_SCALING_ANALYSIS.md](COST_AND_SCALING_ANALYSIS.md) |

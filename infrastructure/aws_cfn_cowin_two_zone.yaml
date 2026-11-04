@@ -378,3 +378,4 @@ Outputs:
   InstanceBZoneBId:
     Description: EC2 Instance ID in Zone B (redundant survivor instance)
     Value: !Ref InstanceZoneB
+

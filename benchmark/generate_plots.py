@@ -71,3 +71,4 @@ for sec in sorted(buckets.keys()):
 print("-" * 78)
 print("Legend: 🔵 = Zone A (ap-south-1a)  |  🟢 = Zone B (ap-south-1b)  |  🔴 = Error (HTTP 5xx)")
 print("=" * 78 + "\n")
+
