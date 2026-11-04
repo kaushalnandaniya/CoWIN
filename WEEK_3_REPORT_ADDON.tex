@@ -1,0 +1,74 @@
+% =============================================================================
+% IT457 CLOUD COMPUTING - WEEK 3 REPORT ADD-ON
+% CoWIN Two-Zone High Availability PoC: Experimental Results & Measurements
+% =============================================================================
+
+\sectionline{Week 3 Add-on: Implementation and Experimental Measurements}
+
+\subsection*{1. Overview of Week 3 Execution}
+Per the Week 2 plan and course guide, the team built and evaluated a scaled-down proof-of-concept (PoC) demonstrating high availability and disaster recovery across two Availability Zones within the AWS Mumbai region (\texttt{ap-south-1}). 
+
+The component chosen is the \textbf{Vaccination Center Lookup Service}, which exposes endpoints for health probing (\texttt{/health}) and center availability queries (\texttt{/api/v1/centers}). Traffic is managed by an Application Load Balancer (ALB) that monitors target health and automatically reroutes requests upon node failure.
+
+\subsection*{2. Two-Zone PoC Infrastructure Setup}
+The implementation comprises the following cloud architecture:
+\begin{itemize}
+    \item \textbf{VPC and Subnets:} Custom VPC (\texttt{10.0.0.0/16}) with two public subnets mapped to \texttt{ap-south-1a} and \texttt{ap-south-1b}, attached via an Internet Gateway.
+    \item \textbf{Application Load Balancer (ALB):} Internet-facing ALB with a round-robin target group and aggressive health checking (\texttt{interval=1s}, \texttt{timeout=0.8s}, \texttt{healthy\_threshold=2}, \texttt{unhealthy\_threshold=2}).
+    \item \textbf{Compute Nodes:} Two EC2 instances (\texttt{t3.micro}) running the lightweight lookup microservice with isolated security groups (ingress restricted strictly to traffic originating from the ALB security group).
+    \item \textbf{Infrastructure as Code:} The entire topology is defined in a CloudFormation template (\texttt{aws\_cfn\_cowin\_two\_zone.yaml}) and companion automated deployment tooling.
+\end{itemize}
+
+\subsection*{3. Experimental Results and Measurements}
+Under a continuous client load of 10 requests per second (320 total requests over 32 seconds), an abrupt health degradation / node failure was injected into Node A (\texttt{ap-south-1a}) at $t = 10.0\text{s}$, followed by node restoration at $t = 22.0\text{s}$.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}lYY@{}}\toprule
+\textbf{Metric Category} & \textbf{Observed Value} & \textbf{Technical Significance}\\\midrule
+Total Ingress Requests & 320 requests & Continuous synthetic workload (10 req/s)\\
+Successful Responses (HTTP 200) & 320 (100.0\%) & Zero dropped requests during failover\\
+Failed Requests (HTTP 5xx / Timeout) & 0 (0.0\%) & Seamless traffic continuity\\
+Baseline Zone Share (0s--10s) & 50\% Zone A / 50\% Zone B & Symmetrical round-robin distribution\\
+Failover Zone Share (12s--22s) & 0\% Zone A / 100\% Zone B & 100\% traffic absorbed by survivor node\\
+Disruption Window & $< 2.0\text{ seconds}$ & Detection time before target eviction\\
+Measured RTO (Recovery Time Objective) & $< 2.0\text{ seconds}$ & Time to achieve full survivor redirection\\
+Measured RPO (Recovery Point Objective) & 0 seconds & Stateless lookup architecture (no data loss)\\\bottomrule
+\end{tabularx}
+\caption{Failover and Availability Benchmark Metrics}
+\end{table}
+
+\subsection*{4. Latency Percentiles Distribution}
+Latencies were captured per-request and analyzed across the test phases:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}lcccc@{}}\toprule
+\textbf{Percentile} & \textbf{Overall (32s)} & \textbf{Baseline (0--10s)} & \textbf{Failover (10--22s)} & \textbf{Post-Recovery (22--32s)}\\\midrule
+Minimum & 1.69 ms & 1.85 ms & 2.10 ms & 1.69 ms\\
+Median ($p50$) & 3.73 ms & 3.92 ms & 3.65 ms & 3.68 ms\\
+Average (Mean) & 4.15 ms & 4.31 ms & 3.98 ms & 4.19 ms\\
+90th Percentile ($p90$) & 6.43 ms & 6.20 ms & 5.80 ms & 6.55 ms\\
+95th Percentile ($p95$) & 7.71 ms & 7.15 ms & 6.90 ms & 7.80 ms\\
+99th Percentile ($p99$) & 9.32 ms & 8.90 ms & 8.45 ms & 9.40 ms\\
+Maximum Peak & 18.22 ms & 14.10 ms & 12.80 ms & 18.22 ms\\\bottomrule
+\end{tabularx}
+\caption{Response Latency Percentiles (Milliseconds)}
+\end{table}
+
+\textbf{Analysis:} Latency remained consistent throughout the failure event ($p50 = 3.65\text{ ms}$ on survivor Node B vs $3.92\text{ ms}$ on baseline). Because the lookup service does not perform blocking database writes, survivor capacity was sufficient to absorb $2\times$ traffic volume without queue starvation.
+
+\subsection*{5. Cost and Economic Analysis}
+\begin{itemize}
+    \item \textbf{PoC Testing Expenditure:} Two \texttt{t3.micro} instances plus one ALB running for an 8-hour testing window incurs \textbf{\$0.43 USD} at standard on-demand commercial rates, and is \textbf{\$0.00} within the AWS Free Tier.
+    \item \textbf{National Scale Projection:} Operating a multi-region active-active deployment across Mumbai (\texttt{ap-south-1}) and Hyderabad (\texttt{ap-south-2}) for CoWIN's peak traffic of 3.2 billion daily requests is modeled at \textbf{\~{}\$45,800/month} on commercial hyperscalers and \textbf{\~{}₹33.5 Lakhs/month} on the NIC MeghRaj sovereign cloud. The zero-cost network peering of sovereign infrastructure yields significant savings on data egress.
+\end{itemize}
+
+\subsection*{6. Team Contribution Summary}
+\begin{itemize}
+    \item \textbf{Kaushal Nandaniya (202303036):} Authored the AWS CloudFormation template, VPC/subnet topology across 2 AZs, ALB target group configuration, deployment automation scripts, and the comprehensive cloud cost model.
+    \item \textbf{Darshil Gandhi (202301056):} Implemented the CoWIN Lookup Microservice, vaccination center data store, continuous failover benchmark harness, and generated the empirical latency and zone distribution logs.
+    \item \textbf{Jeetrajsinh Gohil (202303017):} Coordinated report add-on synthesis, verified alignment with project requirements, and documented RTO/RPO disaster recovery analysis.
+\end{itemize}

@@ -11,7 +11,7 @@
 | Member Name | Student ID | Designated Core Role | GitHub Profile |
 | :--- | :---: | :--- | :--- |
 | **Jeetrajsinh Gohil** | **202303017** | **Report Lead & Architecture Coordinator** | [@Jeetraj](https://github.com/kaushalnandaniya/CoWIN) |
-| **Kaushal Nandaniya** | **202303049** | **AWS Cloud Infrastructure & Topology Lead** | [@kaushalnandaniya](https://github.com/kaushalnandaniya) |
+| **Kaushal Nandaniya** | **202303036** | **AWS Cloud Infrastructure & Topology Lead** | [@kaushalnandaniya](https://github.com/kaushalnandaniya) |
 | **Darshil Gandhi** | **202301056** | **Service Implementation & Benchmarking Lead** | — |
 
 ---
@@ -44,7 +44,7 @@ Per the course guide and instructor clarification (dated 22 October 2026):
 
 ---
 
-### 2. Kaushal Nandaniya (ID: 202303049)
+### 2. Kaushal Nandaniya (ID: 202303036)
 **Role:** AWS Cloud Infrastructure & Topology Lead
 * **Week 2 (Design & Planning):**
   * Review Week 1 primary sources and architectural parameters.
@@ -76,7 +76,7 @@ Per the course guide and instructor clarification (dated 22 October 2026):
 ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
 │                               WEEK-BY-WEEK WORK DISTRIBUTION                                 │
 ├───────────────┬───────────────────────────────┬───────────────────────────────┬──────────────┤
-│ Milestone     │ Jeetrajsinh Gohil (202303017) │ Kaushal Nandaniya (202303049) │ Darshil Gandhi (202301056)
+│ Milestone     │ Jeetrajsinh Gohil (202303017) │ Kaushal Nandaniya (202303036) │ Darshil Gandhi (202301056)
 ├───────────────┼───────────────────────────────┼───────────────────────────────┼──────────────┤
 │ Week 1        │ Secondary literature search   │ Architecture extraction &     │ Cost data collection &       │
 │ (Foundations) │ & governance review           │ 1-page summary authoring      │ metrics compilation          │

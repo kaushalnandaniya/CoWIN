@@ -1,0 +1,380 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IT457 Cloud Computing - CoWIN Case Study Week 3 PoC:
+  Two-Zone High-Availability Architecture with Application Load Balancer
+  and Automated Failover on Amazon Web Services (ap-south-1).
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t4g.micro, t2.micro]
+    Description: EC2 Instance Type for lookup service nodes
+
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+    Description: SSM Parameter to automatically fetch latest Amazon Linux 2023 AMI
+
+Resources:
+  # =========================================================================
+  # 1. NETWORKING LAYER (VPC, Subnets, Gateway, Route Tables)
+  # =========================================================================
+  CoWINVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: CoWIN-PoC-VPC
+        - Key: Project
+          Value: IT457-CoWIN
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: CoWIN-PoC-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref CoWINVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CoWINVPC
+      Tags:
+        - Key: Name
+          Value: CoWIN-Public-RouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Availability Zone A Subnet (e.g. ap-south-1a)
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CoWINVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: CoWIN-Public-Subnet-ZoneA
+
+  SubnetRouteTableAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref RouteTable
+
+  # Availability Zone B Subnet (e.g. ap-south-1b)
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CoWINVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: CoWIN-Public-Subnet-ZoneB
+
+  SubnetRouteTableAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref RouteTable
+
+  # =========================================================================
+  # 2. SECURITY GROUPS (Defense-in-depth isolation)
+  # =========================================================================
+  # ALB Security Group: Inbound HTTP 80 from anywhere
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTP from clients to ALB
+      VpcId: !Ref CoWINVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: CoWIN-ALB-SG
+
+  # Instance Security Group: Inbound HTTP 8080 ONLY from ALB
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTP traffic only from Application Load Balancer
+      VpcId: !Ref CoWINVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: CoWIN-Instance-SG
+
+  # =========================================================================
+  # 3. APPLICATION LOAD BALANCER & TARGET GROUP
+  # =========================================================================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cowin-lookup-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: CoWIN-PoC-ALB
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cowin-lookup-tg
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref CoWINVPC
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckPort: '8080'
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 2
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref InstanceZoneA
+          Port: 8080
+        - Id: !Ref InstanceZoneB
+          Port: 8080
+      Tags:
+        - Key: Name
+          Value: CoWIN-Lookup-TG
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # =========================================================================
+  # 4. COMPUTE NODES (Redundant EC2 Instances across Zone A and Zone B)
+  # =========================================================================
+  InstanceZoneA:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: CoWIN-Lookup-ZoneA
+        - Key: Zone
+          Value: Zone-A
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3 git
+          mkdir -p /opt/cowin
+
+          # Get IMDSv2 token & instance metadata
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+          cat << 'EOF' > /opt/cowin/app.py
+          import argparse, json, os, socket, sys, time
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          from urllib.parse import urlparse, parse_qs
+
+          ZONE = os.environ.get("AWS_AZ", "unknown-zone")
+          INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", "unknown-instance")
+          START_TIME = time.time()
+          REQUESTS = 0
+
+          CENTERS = [
+            {"center_id": 563001, "name": "Civil Hospital Asarwa CVC", "district_name": "Ahmedabad", "pincode": 380016, "fee_type": "Free", "capacity": 150},
+            {"center_id": 563002, "name": "SVP Hospital Urban Health CVC", "district_name": "Ahmedabad", "pincode": 380006, "fee_type": "Free", "capacity": 220},
+            {"center_id": 563003, "name": "Apollo Hospitals International CVC", "district_name": "Gandhinagar", "pincode": 382428, "fee_type": "Paid", "capacity": 300}
+          ]
+
+          class Handler(BaseHTTPRequestHandler):
+              def _resp(self, code, data):
+                  self.send_response(code)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("X-Served-By-Zone", ZONE)
+                  self.send_header("X-Instance-Id", INSTANCE_ID)
+                  self.end_headers()
+                  self.wfile.write(json.dumps(data, indent=2).encode())
+
+              def do_GET(self):
+                  global REQUESTS
+                  REQUESTS += 1
+                  p = urlparse(self.path).path
+                  if p == "/health":
+                      self._resp(200, {"status": "healthy", "zone": ZONE, "instance_id": INSTANCE_ID, "uptime": round(time.time() - START_TIME, 1)})
+                  elif p in ("/api/v1/centers", "/centers"):
+                      self._resp(200, {"service": "CoWIN Lookup", "served_by": {"zone": ZONE, "instance_id": INSTANCE_ID}, "centers": CENTERS})
+                  else:
+                      self._resp(200, {"service": "CoWIN PoC Node", "zone": ZONE, "instance_id": INSTANCE_ID, "requests_served": REQUESTS})
+
+          server = HTTPServer(("0.0.0.0", 8080), Handler)
+          server.serve_forever()
+          EOF
+
+          cat << EOF > /etc/systemd/system/cowin.service
+          [Unit]
+          Description=CoWIN Lookup Microservice
+          After=network.target
+
+          [Service]
+          Type=simple
+          Environment="AWS_AZ=$AZ"
+          Environment="AWS_INSTANCE_ID=$IID"
+          ExecStart=/usr/bin/python3 /opt/cowin/app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable cowin
+          systemctl start cowin
+
+  InstanceZoneB:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnetB
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: CoWIN-Lookup-ZoneB
+        - Key: Zone
+          Value: Zone-B
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3 git
+          mkdir -p /opt/cowin
+
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+          cat << 'EOF' > /opt/cowin/app.py
+          import argparse, json, os, socket, sys, time
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          from urllib.parse import urlparse, parse_qs
+
+          ZONE = os.environ.get("AWS_AZ", "unknown-zone")
+          INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", "unknown-instance")
+          START_TIME = time.time()
+          REQUESTS = 0
+
+          CENTERS = [
+            {"center_id": 563001, "name": "Civil Hospital Asarwa CVC", "district_name": "Ahmedabad", "pincode": 380016, "fee_type": "Free", "capacity": 150},
+            {"center_id": 563002, "name": "SVP Hospital Urban Health CVC", "district_name": "Ahmedabad", "pincode": 380006, "fee_type": "Free", "capacity": 220},
+            {"center_id": 563003, "name": "Apollo Hospitals International CVC", "district_name": "Gandhinagar", "pincode": 382428, "fee_type": "Paid", "capacity": 300}
+          ]
+
+          class Handler(BaseHTTPRequestHandler):
+              def _resp(self, code, data):
+                  self.send_response(code)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("X-Served-By-Zone", ZONE)
+                  self.send_header("X-Instance-Id", INSTANCE_ID)
+                  self.end_headers()
+                  self.wfile.write(json.dumps(data, indent=2).encode())
+
+              def do_GET(self):
+                  global REQUESTS
+                  REQUESTS += 1
+                  p = urlparse(self.path).path
+                  if p == "/health":
+                      self._resp(200, {"status": "healthy", "zone": ZONE, "instance_id": INSTANCE_ID, "uptime": round(time.time() - START_TIME, 1)})
+                  elif p in ("/api/v1/centers", "/centers"):
+                      self._resp(200, {"service": "CoWIN Lookup", "served_by": {"zone": ZONE, "instance_id": INSTANCE_ID}, "centers": CENTERS})
+                  else:
+                      self._resp(200, {"service": "CoWIN PoC Node", "zone": ZONE, "instance_id": INSTANCE_ID, "requests_served": REQUESTS})
+
+          server = HTTPServer(("0.0.0.0", 8080), Handler)
+          server.serve_forever()
+          EOF
+
+          cat << EOF > /etc/systemd/system/cowin.service
+          [Unit]
+          Description=CoWIN Lookup Microservice
+          After=network.target
+
+          [Service]
+          Type=simple
+          Environment="AWS_AZ=$AZ"
+          Environment="AWS_INSTANCE_ID=$IID"
+          ExecStart=/usr/bin/python3 /opt/cowin/app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable cowin
+          systemctl start cowin
+
+Outputs:
+  VPCId:
+    Description: VPC Identifier
+    Value: !Ref CoWINVPC
+
+  LoadBalancerURL:
+    Description: Public URL of the Application Load Balancer
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+
+  LoadBalancerDNSName:
+    Description: ALB DNS Hostname for Benchmarking
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  TargetGroupArn:
+    Description: ARN of the Target Group (for inspecting target health states)
+    Value: !Ref ALBTargetGroup
+
+  InstanceAZoneAId:
+    Description: EC2 Instance ID in Zone A (target to stop during failover test)
+    Value: !Ref InstanceZoneA
+
+  InstanceBZoneBId:
+    Description: EC2 Instance ID in Zone B (redundant survivor instance)
+    Value: !Ref InstanceZoneB
