@@ -14,6 +14,9 @@
 
 | Deliverable | Description | Link |
 | :--- | :--- | :--- |
+| **Week 2 Progress Report (PDF)** | High availability and failover: high-level architecture, PoC plan & team work distribution. | [WEEK_2_PROGRESS_REPORT.pdf](WEEK_2_PROGRESS_REPORT.pdf) |
+| **Week 2 Progress Report (LaTeX)** | LaTeX source with TikZ national-scale architecture and 2-zone PoC diagram. | [WEEK_2_PROGRESS_REPORT.tex](WEEK_2_PROGRESS_REPORT.tex) |
+| **Team Work Division (3 Members)** | Comprehensive role allocation, RACI matrix, week-by-week tasks, and PoC ownership. | [TEAM_WORK_DIVISION.md](TEAM_WORK_DIVISION.md) |
 | **Week 1 Checkpoint Summary (Markdown)** | Full executive summary covering primary sources found, architecture, cost data, and outcomes. | [WEEK_1_SUMMARY.md](WEEK_1_SUMMARY.md) |
 | **Week 1 Checkpoint Summary (1-Page PDF)** | Exact 1-page submission-ready executive summary report. | [WEEK_1_SUMMARY.pdf](WEEK_1_SUMMARY.pdf) |
 | **Week 1 HTML Version** | Clean, styled HTML document with print CSS layout. | [WEEK_1_SUMMARY.html](WEEK_1_SUMMARY.html) |
@@ -72,11 +75,11 @@
 
 ## 📅 Project Plan & Milestones
 
-- [x] **Week 1 (Current Checkpoint):** Find primary sources, relevant information, extract architecture, cost and outcome data. Deliverable: One-page summary.
-- [ ] **Week 2:** Detailed study, comprehensive architecture diagram, problem definition, solution analysis, 10-page report, exercise plan & team roles.
-- [ ] **Week 3:** Build the core exercise (**High-Concurrency Distributed Slot Reservation Engine** with Redis distributed locks, async message buffer, and PostgreSQL), run experiments (latency, scaling behavior, cost), and test system.
-- [ ] **Week 4:** Final report preparation, consolidation, and submission.
-- [ ] **Week 5:** Project VIVA defense.
+- [x] **Week 1 (Foundations):** Primary sources found, relevant information, extract architecture, cost and outcome data. Deliverable: One-page summary.
+- [x] **Week 2 (Design & PoC Planning):** High availability & failover study, conceptual multi-region architecture (TikZ), 2-zone AWS PoC design, and team work allocation.
+- [ ] **Week 3 (Implementation & Experiments):** Deploy 2-zone lookup API behind AWS ALB, conduct instance-stop failover demonstration, collect timestamped metrics (disruption window, response latency), and document evidence.
+- [ ] **Week 4:** Final report consolidation, architecture verification, and submission.
+- [ ] **Week 5:** Project VIVA presentation and defense.
 
 ---
 
@@ -91,5 +94,12 @@
 
 ---
 
-## 👤 Author
-* **Kaushal Nandaniya** ([@kaushalnandaniya](https://github.com/kaushalnandaniya))
+## 👥 Team Members & Role Allocation (3 Members)
+
+See detailed breakdown, milestone matrix, and RACI ownership in [**TEAM_WORK_DIVISION.md**](TEAM_WORK_DIVISION.md).
+
+| Student Name | Student ID | Designated Core Role | Primary Responsibilities |
+| :--- | :---: | :--- | :--- |
+| **Jeetrajsinh Gohil** | **202303017** | **Report Lead & Architecture Coordinator** | Problem definition, HA research, national-scale architecture diagram, failover review, and report coordination. |
+| **Kaushal Nandaniya** | **202303049** | **AWS Cloud Infrastructure & Topology Lead** | AWS VPC/subnet design across 2 AZs, ALB & EC2 provisioning, health checks configuration, and cost modeling. |
+| **Darshil Gandhi** | **202301056** | **Service Implementation & Benchmarking Lead** | Lightweight lookup API, client polling test harness, continuous failover stress scripts, disruption window metric logging, and screen evidence. |
