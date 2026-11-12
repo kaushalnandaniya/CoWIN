@@ -10,7 +10,7 @@
 
 | Member Name | Student ID | Designated Core Role | GitHub Profile |
 | :--- | :---: | :--- | :--- |
-| **Jeetrajsinh Gohil** | **202303017** | **Report Lead & Architecture Coordinator** | [@Jeetraj](https://github.com/kaushalnandaniya/CoWIN) |
+| **Jeetrajsinh Gohil** | **202303017** | **Report Lead & Architecture Coordinator** | [@jeetrex17](https://github.com/jeetrex17) |
 | **Kaushal Nandaniya** | **202303036** | **AWS Cloud Infrastructure & Topology Lead** | [@kaushalnandaniya](https://github.com/kaushalnandaniya) |
 | **Darshil Gandhi** | **202301056** | **Service Implementation & Benchmarking Lead** | — |
 
