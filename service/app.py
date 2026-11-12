@@ -13,6 +13,17 @@ Hardened service shape (behavior-compatible with the original PoC service):
   dropped connections; a malformed pincode filter is a JSON 400
 - Threaded HTTP server so ALB health probes and client traffic do not
   queue behind each other; mutable runtime state is guarded by a lock
+
+Production-readiness additions (still zero external dependencies):
+- SQLite-backed center store (stdlib sqlite3): the JSON dataset is loaded
+  into a real database on first start and /api/v1/centers is served from
+  it, byte-compatible with the original file-backed responses
+- API-key authentication for the mutating /simulate/* endpoints via the
+  X-API-Key header (COWIN_API_KEY; unset = dev mode with a startup warning)
+- Per-client-IP token-bucket rate limiting (RATE_LIMIT_RPS /
+  RATE_LIMIT_BURST; 0 disables) with JSON 429s; /health and /metrics exempt
+- /metrics endpoint: uptime, zone health state, request/response counters,
+  store info, and auth/rate-limit counters for monitoring
 """
 
 import argparse
@@ -43,6 +54,9 @@ PROTECTED_PATHS = frozenset({"/simulate/fail", "/simulate/recover"})
 # Paths exempt from rate limiting: ALB health probes and metrics scrapers
 # must never be throttled, or failover detection would break.
 RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/metrics"})
+
+# Longest accepted district filter; longer values are rejected as 400.
+MAX_DISTRICT_FILTER_LENGTH = 100
 
 # Sample record served if the centers dataset cannot be loaded.
 FALLBACK_CENTERS = [
@@ -106,6 +120,8 @@ class ServiceState:
         self.force_unhealthy = False
 
         self.auth_failures = 0
+        self.requests_by_endpoint = {}
+        self.responses_by_status = {}
 
     def record_request(self):
         with self._lock:
@@ -119,6 +135,19 @@ class ServiceState:
     def auth_failure_count(self):
         with self._lock:
             return self.auth_failures
+
+    def record_response(self, path, status_code):
+        with self._lock:
+            self.requests_by_endpoint[path] = \
+                self.requests_by_endpoint.get(path, 0) + 1
+            self.responses_by_status[status_code] = \
+                self.responses_by_status.get(status_code, 0) + 1
+
+    def response_snapshot(self):
+        """Consistent copies of the response counters, for /metrics."""
+        with self._lock:
+            return (dict(sorted(self.requests_by_endpoint.items())),
+                    dict(self.responses_by_status))
 
     def set_unhealthy(self, flag):
         with self._lock:
@@ -329,6 +358,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _write_json(self, body, status_code=200, extra_headers=None):
+        self.state.record_response(urlparse(self.path).path, status_code)
         self._set_headers(status_code, extra_headers=extra_headers)
         self.wfile.write(json.dumps(body, indent=2).encode("utf-8"))
 
@@ -419,6 +449,13 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             # Optional filter by district
             if "district" in query:
                 req_district = query["district"][0].lower()
+                if len(req_district) > MAX_DISTRICT_FILTER_LENGTH:
+                    self._write_json({
+                        "error": "Bad Request",
+                        "message": "district filter is too long "
+                                   f"(max {MAX_DISTRICT_FILTER_LENGTH} characters)"
+                    }, status_code=400)
+                    return
 
             results = self.store.query(pincode=req_pincode,
                                        district=req_district)
@@ -432,6 +469,11 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                 "count": len(results),
                 "centers": results
             })
+            return
+
+        # Metrics Endpoint - operational counters for monitoring
+        if path == "/metrics":
+            self._metrics()
             return
 
         # Root Endpoint - Instance Info & Diagnostics
@@ -453,7 +495,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                     "health_check": "/health",
                     "lookup_centers": "/api/v1/centers",
                     "lookup_by_pincode": "/api/v1/centers?pincode=380009",
-                    "lookup_by_district": "/api/v1/centers?district=Ahmedabad"
+                    "lookup_by_district": "/api/v1/centers?district=Ahmedabad",
+                    "metrics": "/metrics"
                 }
             })
             return
@@ -462,7 +505,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self._write_json({
             "error": "Not Found",
             "path": path,
-            "message": "Valid endpoints are /health, /api/v1/centers, and /"
+            "message": "Valid endpoints are /health, /api/v1/centers, /metrics, and /"
         }, status_code=404)
 
     def do_POST(self):
@@ -501,6 +544,17 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
 
         self._write_json({"error": "Unknown POST action"}, status_code=404)
 
+    def _method_not_allowed(self):
+        """JSON 405 for unsupported methods instead of the default HTML 501."""
+        self._write_json({
+            "error": "Method Not Allowed",
+            "message": "This service supports GET, POST and OPTIONS only"
+        }, status_code=405, extra_headers={"Allow": "GET, POST, OPTIONS"})
+
+    do_PUT = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_PATCH = _method_not_allowed
+
     def _check_rate_limit(self, path):
         """Return True when the request may proceed under the rate limit;
         otherwise write the JSON 429 and return False."""
@@ -537,6 +591,36 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             "message": f"A valid {AUTH_HEADER} header is required for this endpoint"
         }, status_code=401)
         return False
+
+    def _metrics(self):
+        """Operational counters snapshot for monitoring and the demo."""
+        by_endpoint, by_status = self.state.response_snapshot()
+        limiter = self.server.rate_limiter
+        self._write_json({
+            "service": "CoWIN Vaccination Center Lookup",
+            "zone": self.config.zone,
+            "instance_id": self.config.instance_id,
+            "status": "unhealthy" if self.state.is_unhealthy() else "healthy",
+            "uptime_seconds": self.state.uptime(),
+            "total_requests_served": self.state.total_requests(),
+            "requests_by_endpoint": by_endpoint,
+            "responses_by_status": {str(code): count for code, count in
+                                    sorted(by_status.items())},
+            "store": {
+                "backend": self.store.backend,
+                "centers_loaded": self.store.count(),
+            },
+            "auth": {
+                "enabled": self.config.api_key is not None,
+                "failed_attempts": self.state.auth_failure_count(),
+            },
+            "rate_limit": {
+                "enabled": limiter.enabled,
+                "requests_per_second": limiter.rps,
+                "burst": limiter.burst,
+                "rejected_requests": limiter.rejected_total,
+            },
+        })
 
     def _simulate_fail(self):
         self.state.set_unhealthy(True)
