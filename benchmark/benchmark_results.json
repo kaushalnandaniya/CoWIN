@@ -2,8 +2,8 @@
   "benchmark_metadata": {
     "course": "IT457 Cloud Computing",
     "project": "CoWIN Two-Zone High Availability PoC",
-    "date": "2026-11-12 13:00:48",
-    "target_url": "http://localhost:9000",
+    "date": "2026-11-12 14:53:56",
+    "target_url": "http://localhost:9080",
     "duration_seconds": 32,
     "request_rate_rps": 10
   },
@@ -15,19 +15,19 @@
     "error_rate_percent": 0.0
   },
   "latency_percentiles_ms": {
-    "min": 0.89,
-    "mean": 1.14,
-    "p50": 1.07,
-    "p90": 1.42,
-    "p95": 1.59,
-    "p99": 1.92,
-    "max": 2.52
+    "min": 1.18,
+    "mean": 1.39,
+    "p50": 1.34,
+    "p90": 1.48,
+    "p95": 1.65,
+    "p99": 2.21,
+    "max": 3.77
   },
   "traffic_distribution": {
-    "zone_a_ap_south_1a_requests": 100,
-    "zone_b_ap_south_1b_requests": 220,
-    "zone_a_share_percent": 31.2,
-    "zone_b_share_percent": 68.8
+    "zone_a_ap_south_1a_requests": 99,
+    "zone_b_ap_south_1b_requests": 221,
+    "zone_a_share_percent": 30.9,
+    "zone_b_share_percent": 69.1
   },
   "availability_and_failover": {
     "failure_injected_at_second": 10.0,
