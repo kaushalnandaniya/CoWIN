@@ -33,7 +33,9 @@ def percentile(data, p):
     return round(sorted_data[f], 2)
 
 
-def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=True):
+def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=True,
+                  fail_url="http://127.0.0.1:8081/simulate/fail",
+                  recover_url="http://127.0.0.1:8081/simulate/recover"):
     print("=" * 75)
     print("   IT457 CLOUD COMPUTING: COWIN TWO-ZONE FAILOVER EXPERIMENT")
     print("=" * 75)
@@ -49,9 +51,11 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
     t_start = time.time()
     t_failure_injected = None
     t_first_disruption = None
+    t_last_disruption = None
     t_failover_completed = None
     t_recovery_injected = None
     t_rebalanced = None
+    survivor_zone = None
 
     failure_injected = False
     recovery_injected = False
@@ -68,7 +72,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
             t_failure_injected = time.time()
             print(f"\n⚡ [{elapsed:.1f}s] INJECTING FAILURE: Simulating Zone A EC2 Health Check Degradation (HTTP 500)...")
             try:
-                req_f = urllib.request.Request("http://127.0.0.1:8081/simulate/fail", data=b"{}")
+                req_f = urllib.request.Request(fail_url, data=b"{}")
                 urllib.request.urlopen(req_f, timeout=1.0)
             except Exception as e:
                 print(f"   (Failed to contact Zone A directly: {e})")
@@ -79,7 +83,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
             t_recovery_injected = time.time()
             print(f"\n🔄 [{elapsed:.1f}s] TRIGGERING RECOVERY: Restoring Zone A Instance to Healthy State...")
             try:
-                req_r = urllib.request.Request("http://127.0.0.1:8081/simulate/recover", data=b"{}")
+                req_r = urllib.request.Request(recover_url, data=b"{}")
                 urllib.request.urlopen(req_r, timeout=1.0)
             except Exception as e:
                 print(f"   (Failed to contact Zone A directly: {e})")
@@ -116,24 +120,33 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         req_latency = (time.time() - req_start) * 1000  # ms
 
         # Track failure & recovery state transitions
-        if t_failure_injected and not success and not t_first_disruption:
-            t_first_disruption = time.time()
-            print(f"   ⚠️ [{elapsed:.2f}s] First request error detected: {status_code} ({error_msg})")
+        if t_failure_injected and not success:
+            if not t_first_disruption:
+                t_first_disruption = time.time()
+                print(f"   ⚠️ [{elapsed:.2f}s] First request error detected: {status_code} ({error_msg})")
+            t_last_disruption = time.time()
 
-        if t_first_disruption and not t_failover_completed:
-            # Check if recent 5 requests have succeeded consistently on survivor zone
+        # Failover = post-injection convergence of ALL traffic onto one surviving
+        # zone. A health-check-driven eviction is graceful: in-flight requests to
+        # the degraded node can keep succeeding, so detection must NOT depend on
+        # observing a failed request. Round-robin alternates zones strictly, so 5
+        # consecutive successful responses from a single zone only happen once the
+        # failed target has been evicted from the pool.
+        if t_failure_injected and not t_failover_completed:
             recent_success = [r["success"] for r in records[-4:]] + [success]
             recent_zones = [r["zone"] for r in records[-4:]] + [zone_served]
-            if len(recent_success) == 5 and all(recent_success) and all(z == "ap-south-1b" for z in recent_zones):
+            if (len(recent_success) == 5 and all(recent_success)
+                    and len(set(recent_zones)) == 1 and recent_zones[0] != "unknown"):
                 t_failover_completed = time.time()
-                disruption_secs = t_failover_completed - t_failure_injected
-                print(f"   ✅ [{elapsed:.2f}s] FAILOVER ACHIEVED: 100% traffic rerouted to Zone B!")
-                print(f"      Observed Disruption Window: {disruption_secs:.2f} seconds")
+                survivor_zone = recent_zones[0]
+                failover_secs = t_failover_completed - t_failure_injected
+                print(f"   ✅ [{elapsed:.2f}s] FAILOVER ACHIEVED: 100% traffic rerouted to {survivor_zone}!")
+                print(f"      Failover Time (inject -> fully rerouted): {failover_secs:.2f} seconds")
 
         if t_recovery_injected and not t_rebalanced:
-            if zone_served == "ap-south-1a" and success:
+            if survivor_zone and zone_served != survivor_zone and zone_served != "unknown" and success:
                 t_rebalanced = time.time()
-                print(f"   🎉 [{elapsed:.2f}s] RE-BALANCING VERIFIED: Zone A target re-admitted to ALB pool!")
+                print(f"   🎉 [{elapsed:.2f}s] RE-BALANCING VERIFIED: recovered target re-admitted to ALB pool!")
 
         # Categorize test phase
         if elapsed < 10.0:
@@ -183,7 +196,24 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
     zone_a_count = sum(1 for r in successful_reqs if r["zone"] == "ap-south-1a")
     zone_b_count = sum(1 for r in successful_reqs if r["zone"] == "ap-south-1b")
 
-    disruption_window = round((t_failover_completed - t_failure_injected), 2) if (t_failure_injected and t_failover_completed) else 0.0
+    # Two distinct measurements (previously conflated, which reported
+    # failover_achieved=false and a 0.0s window on every graceful failover):
+    #
+    # 1. Failover time: failure injection -> traffic fully converged on the
+    #    surviving zone (health-check detection + target eviction + reroute).
+    # 2. Disruption window: the span in which user-facing requests actually
+    #    FAILED. A graceful ALB eviction can legitimately be 0.0s here - the
+    #    degraded node kept serving 200s until the health checker evicted it.
+    failover_time = round((t_failover_completed - t_failure_injected), 2) if (t_failure_injected and t_failover_completed) else None
+    if t_first_disruption and t_last_disruption:
+        disruption_window = round(t_last_disruption - t_first_disruption, 2)
+    else:
+        disruption_window = 0.0  # no request ever failed: zero-downtime failover
+
+    post_injection = [r for r in records if t_failure_injected and r["timestamp"] >= t_failure_injected]
+    post_failover_availability = round(
+        (sum(1 for r in post_injection if r["success"]) / len(post_injection)) * 100, 2
+    ) if post_injection else 0.0
 
     summary = {
         "benchmark_metadata": {
@@ -219,11 +249,13 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         "availability_and_failover": {
             "failure_injected_at_second": 10.0,
             "failover_achieved": t_failover_completed is not None,
+            "failover_time_seconds": failover_time,
             "disruption_window_seconds": disruption_window,
-            "recovery_time_objective_rto_seconds": disruption_window,
+            "failed_requests_during_experiment": len(failed_reqs),
+            "recovery_time_objective_rto_seconds": failover_time,
             "recovery_point_objective_rpo": "0 seconds (Read/Lookup Service Stateless)",
-            "survivor_zone": "ap-south-1b",
-            "post_failover_availability_percent": 100.0
+            "survivor_zone": survivor_zone,
+            "post_failover_availability_percent": post_failover_availability
         }
     }
 
@@ -250,10 +282,14 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
     print(f"  • Zone B (ap-south-1b) : {zone_b_count:3d} requests ({summary['traffic_distribution']['zone_b_share_percent']}%)")
     print("-" * 75)
     print("FAILOVER & DISASTER RECOVERY METRICS:")
-    print(f"  • Observed Disruption Window : {disruption_window:.2f} seconds")
-    print(f"  • Measured RTO               : {disruption_window:.2f} seconds")
+    print(f"  • Failover Achieved          : {t_failover_completed is not None}")
+    if failover_time is not None:
+        print(f"  • Failover Time (detect+reroute): {failover_time:.2f} seconds")
+    print(f"  • Disruption Window (errors) : {disruption_window:.2f} seconds ({len(failed_reqs)} failed requests)")
+    print(f"  • Measured RTO               : {failover_time:.2f} seconds" if failover_time is not None else "  • Measured RTO               : n/a (failover not observed)")
     print(f"  • Measured RPO               : 0 seconds (Stateless read architecture)")
-    print(f"  • Survivor Zone Continuity   : 100% requests absorbed by Zone B during failure")
+    if survivor_zone:
+        print(f"  • Survivor Zone Continuity   : 100% requests absorbed by {survivor_zone} during failure")
     print("=" * 75)
 
     # Save output artifacts
@@ -280,11 +316,17 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=int, default=32, help="Test duration in seconds")
     parser.add_argument("--rps", type=int, default=10, help="Requests per second")
     parser.add_argument("--no-auto-fail", action="store_true", help="Do not trigger auto-failure (for live manual tests)")
+    parser.add_argument("--fail-url", type=str, default="http://127.0.0.1:8081/simulate/fail",
+                        help="Direct URL used to degrade the Zone A target's health checks")
+    parser.add_argument("--recover-url", type=str, default="http://127.0.0.1:8081/simulate/recover",
+                        help="Direct URL used to restore the Zone A target's health checks")
     args = parser.parse_args()
 
     run_benchmark(
         target_url=args.url.rstrip("/"),
         total_seconds=args.duration,
         req_per_sec=args.rps,
-        trigger_failure=not args.no_auto_fail
+        trigger_failure=not args.no_auto_fail,
+        fail_url=args.fail_url,
+        recover_url=args.recover_url
     )

@@ -201,9 +201,14 @@ class ALBProxyHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_alb_simulator(port=8080):
+def run_alb_simulator(port=8080, target_ports=None):
     global PORT
     PORT = port
+    if target_ports:
+        # Override the default backend ports (8081/8082) so the simulator can
+        # run on machines where those ports are already occupied.
+        for target, target_port in zip(TARGETS, target_ports):
+            target["port"] = target_port
     health_thread = threading.Thread(target=run_health_check_loop, daemon=True)
     health_thread.start()
 
@@ -222,5 +227,7 @@ def run_alb_simulator(port=8080):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CoWIN ALB Local Simulator")
     parser.add_argument("--port", type=int, default=8080, help="ALB listener port")
+    parser.add_argument("--target-ports", type=int, nargs=2, metavar=("ZONE_A_PORT", "ZONE_B_PORT"),
+                        default=[8081, 8082], help="Backend ports of the Zone A and Zone B instances")
     args = parser.parse_args()
-    run_alb_simulator(args.port)
+    run_alb_simulator(args.port, target_ports=args.target_ports)
