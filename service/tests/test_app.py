@@ -22,8 +22,10 @@ import json
 import os
 import sys
 import threading
+import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # Make `import app` work both under unittest discovery (which puts the
@@ -227,6 +229,144 @@ class TestServerLifecycle(unittest.TestCase):
         finally:
             os.environ.clear()
             os.environ.update(saved)
+
+
+class TestMalformedInputs(unittest.TestCase):
+    """Malformed request inputs produce clean JSON errors, never a crash."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd, cls.thread, cls.base_url = start_test_server()
+        with open(DATA_FILE) as f:
+            cls.dataset = json.load(f)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=5)
+
+    def request(self, path, method="GET"):
+        req = urllib.request.Request(self.base_url + path, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read()
+                return resp.status, resp.headers, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            return e.code, e.headers, json.loads(raw) if raw else None
+
+    def test_malformed_pincode_variants_return_400(self):
+        for bad in ("abc", "380016.5", "1e5", "0x1F", "380016;380006", "%ZZ"):
+            status, _, body = self.request(
+                "/api/v1/centers?pincode=" + urllib.parse.quote(bad))
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(body["error"], "Bad Request")
+
+    def test_blank_pincode_is_ignored(self):
+        # parse_qs drops blank values, so this is an unfiltered lookup.
+        status, _, body = self.request("/api/v1/centers?pincode=")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["count"], len(self.dataset))
+
+    def test_unknown_query_parameters_ignored(self):
+        status, _, body = self.request("/api/v1/centers?color=blue&limit=3")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["count"], len(self.dataset))
+
+    def test_out_of_range_pincode_returns_empty_not_error(self):
+        status, _, body = self.request("/api/v1/centers?pincode=99999999999999999999")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["centers"], [])
+
+    def test_unknown_district_returns_empty(self):
+        status, _, body = self.request("/api/v1/centers?district=NoSuchDistrict")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["centers"], [])
+
+    def test_trailing_slash_path_returns_json_404(self):
+        status, _, body = self.request("/api/v1/centers/")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"], "Not Found")
+        self.assertEqual(body["path"], "/api/v1/centers/")
+
+    def test_paths_are_case_sensitive(self):
+        status, _, body = self.request("/HEALTH")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"], "Not Found")
+
+    def test_double_slash_path_is_normalized(self):
+        # BaseHTTPRequestHandler collapses a leading "//" to "/" before
+        # routing, so this is served by the health endpoint, not a 404.
+        status, _, body = self.request("//health")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "healthy")
+
+
+class TestServiceUnderLoad(unittest.TestCase):
+    """The threaded server keeps answering well-formed responses while a
+    failure is forced in the middle of concurrent traffic."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd, cls.thread, cls.base_url = start_test_server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=5)
+
+    def test_concurrent_requests_during_forced_failure(self):
+        results = []  # (status_code, raw_body) for every completed response
+        errors = []   # transport-level failures: none are acceptable
+        stop = threading.Event()
+
+        def worker(paths):
+            while not stop.is_set():
+                for path in paths:
+                    if stop.is_set():
+                        break
+                    req = urllib.request.Request(self.base_url + path)
+                    try:
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            results.append((resp.status, resp.read()))
+                    except urllib.error.HTTPError as e:
+                        results.append((e.code, e.read()))
+                    except Exception as e:  # connection reset, timeout, ...
+                        errors.append(f"{type(e).__name__}: {e}")
+
+        paths = ["/health", "/api/v1/centers", "/api/v1/centers?pincode=380016", "/"]
+        workers = []
+        for i in range(8):
+            rotated = paths[i % len(paths):] + paths[:i % len(paths)]
+            w = threading.Thread(target=worker, args=(rotated,), daemon=True)
+            w.start()
+            workers.append(w)
+
+        time.sleep(0.5)  # warm concurrent traffic
+        urllib.request.urlopen(self.base_url + "/simulate/fail", timeout=5).read()
+        time.sleep(1.0)  # traffic against the forced failure
+        urllib.request.urlopen(self.base_url + "/simulate/recover", timeout=5).read()
+        time.sleep(0.5)  # traffic after recovery
+        stop.set()
+        for w in workers:
+            w.join(timeout=10)
+
+        self.assertEqual(errors, "transport errors during load: %s" % errors[:5]
+                         if errors else [])
+        self.assertGreater(len(results), 50)
+        codes = {code for code, _ in results}
+        self.assertTrue(codes <= {200, 500}, f"unexpected status codes: {codes}")
+        self.assertIn(500, codes)  # the forced failure was actually observed
+        self.assertIn(200, codes)
+        for code, raw in results:
+            json.loads(raw)  # every response, including 500s, is valid JSON
+
+        with urllib.request.urlopen(self.base_url + "/health", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)  # healthy again after recover
 
 
 if __name__ == "__main__":
