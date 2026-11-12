@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -50,7 +51,7 @@ class ServiceConfig:
     """Static configuration resolved from environment variables and CLI args."""
 
     def __init__(self, host="0.0.0.0", port=DEFAULT_PORT, zone=DEFAULT_ZONE,
-                 instance_id=None, data_file=None):
+                 instance_id=None, data_file=None, db_file=None):
         self.host = host
         self.port = port
         self.zone = zone
@@ -59,6 +60,9 @@ class ServiceConfig:
             data_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "centers_data.json")
         self.data_file = data_file
+        if db_file is None:
+            db_file = os.path.splitext(data_file)[0] + ".db"
+        self.db_file = db_file
 
     @classmethod
     def from_env(cls):
@@ -69,6 +73,7 @@ class ServiceConfig:
             zone=os.environ.get("AWS_AZ", DEFAULT_ZONE),
             instance_id=os.environ.get("AWS_INSTANCE_ID"),
             data_file=os.environ.get("CENTERS_DATA_FILE"),
+            db_file=os.environ.get("CENTERS_DB_FILE"),
         )
 
 
@@ -115,6 +120,125 @@ def load_centers(data_file):
         return FALLBACK_CENTERS
 
 
+def _escape_like(value):
+    """Escape LIKE wildcards so filters keep plain substring semantics."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+class CenterStore:
+    """SQLite-backed store for the centers dataset.
+
+    The JSON dataset is loaded into a real database the first time the
+    service starts; afterwards the database is the source of truth and is
+    only re-populated when it is empty. Lookups run as SQL queries and
+    return the same records, in dataset order, as the original
+    file-backed version.
+    """
+
+    backend = "sqlite"
+
+    def __init__(self, db_file, data_file):
+        self._db_file = db_file
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(db_file, check_same_thread=False)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS centers (
+                    center_id     INTEGER PRIMARY KEY,
+                    position      INTEGER NOT NULL,
+                    pincode       INTEGER,
+                    district_name TEXT,
+                    payload       TEXT NOT NULL
+                )
+                """
+            )
+        if self.count() == 0:
+            self._load(data_file)
+
+    def _load(self, data_file):
+        centers = load_centers(data_file)
+        rows = [
+            (c.get("center_id"), position, c.get("pincode"),
+             c.get("district_name"), json.dumps(c))
+            for position, c in enumerate(centers)
+        ]
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO centers "
+                "(center_id, position, pincode, district_name, payload) "
+                "VALUES (?, ?, ?, ?, ?)", rows)
+        logger.info("Loaded %d centers into SQLite store %s",
+                    len(rows), self._db_file)
+
+    def count(self):
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM centers").fetchone()
+        return row[0]
+
+    def query(self, pincode=None, district=None):
+        """Filtered lookup; district is a case-insensitive substring match."""
+        sql = "SELECT payload FROM centers"
+        clauses, params = [], []
+        if pincode is not None:
+            clauses.append("pincode = ?")
+            params.append(pincode)
+        if district is not None:
+            clauses.append("LOWER(district_name) LIKE ? ESCAPE '\\'")
+            params.append("%" + _escape_like(district) + "%")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY position"
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except OverflowError:
+                # A pincode outside the SQLite integer range can match
+                # nothing; keep the empty-200 behavior of the list filter.
+                return []
+        return [json.loads(row[0]) for row in rows]
+
+    def close(self):
+        with self._lock:
+            self._conn.close()
+
+
+class InMemoryCenterStore:
+    """Fallback used when the SQLite database cannot be opened (for example
+    a read-only deployment directory). Same interface, previous behavior."""
+
+    backend = "memory"
+
+    def __init__(self, data_file):
+        self._centers = load_centers(data_file)
+
+    def count(self):
+        return len(self._centers)
+
+    def query(self, pincode=None, district=None):
+        results = self._centers
+        if pincode is not None:
+            results = [c for c in results if c.get("pincode") == pincode]
+        if district is not None:
+            results = [c for c in results
+                       if district in c.get("district_name", "").lower()]
+        return results
+
+    def close(self):
+        pass
+
+
+def build_store(config):
+    """Create the center store, preferring SQLite with an in-memory fallback."""
+    try:
+        return CenterStore(config.db_file, config.data_file)
+    except Exception as e:
+        logger.warning("Could not initialize SQLite store at %s (%s); "
+                       "falling back to the in-memory dataset",
+                       config.db_file, e)
+        return InMemoryCenterStore(config.data_file)
+
+
 class CoWINLookupHandler(BaseHTTPRequestHandler):
     server_version = SERVICE_VERSION
 
@@ -127,8 +251,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         return self.server.state
 
     @property
-    def centers(self):
-        return self.server.centers
+    def store(self):
+        return self.server.store
 
     def _set_headers(self, status_code=200, content_type="application/json"):
         self.send_response(status_code)
@@ -206,7 +330,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
 
         # Centers Lookup Endpoint
         if path in ("/api/v1/centers", "/centers"):
-            results = self.centers
+            req_pincode = None
+            req_district = None
 
             # Optional filter by pincode
             if "pincode" in query:
@@ -219,12 +344,13 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                                    f"'{query['pincode'][0]}'"
                     }, status_code=400)
                     return
-                results = [c for c in results if c.get("pincode") == req_pincode]
 
             # Optional filter by district
             if "district" in query:
                 req_district = query["district"][0].lower()
-                results = [c for c in results if req_district in c.get("district_name", "").lower()]
+
+            results = self.store.query(pincode=req_pincode,
+                                       district=req_district)
 
             self._write_json({
                 "service": "CoWIN Vaccination Center Lookup",
@@ -328,8 +454,12 @@ class CoWINHTTPServer(ThreadingHTTPServer):
     def __init__(self, config):
         self.config = config
         self.state = ServiceState()
-        self.centers = load_centers(config.data_file)
+        self.store = build_store(config)
         super().__init__((config.host, config.port), CoWINLookupHandler)
+
+    def server_close(self):
+        super().server_close()
+        self.store.close()
 
 
 def create_server(config):
