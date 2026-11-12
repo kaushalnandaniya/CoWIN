@@ -16,6 +16,7 @@ Hardened service shape (behavior-compatible with the original PoC service):
 """
 
 import argparse
+import hmac
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import json
 import logging
@@ -34,6 +35,11 @@ DEFAULT_PORT = 8080
 DEFAULT_ZONE = "ap-south-1a"
 SERVICE_VERSION = "CoWIN-LookupService/1.0"
 
+# Mutating endpoints gated behind the X-API-Key header when COWIN_API_KEY
+# is configured. Read endpoints (health, lookup, info, metrics) stay open.
+AUTH_HEADER = "X-API-Key"
+PROTECTED_PATHS = frozenset({"/simulate/fail", "/simulate/recover"})
+
 # Sample record served if the centers dataset cannot be loaded.
 FALLBACK_CENTERS = [
     {
@@ -51,11 +57,12 @@ class ServiceConfig:
     """Static configuration resolved from environment variables and CLI args."""
 
     def __init__(self, host="0.0.0.0", port=DEFAULT_PORT, zone=DEFAULT_ZONE,
-                 instance_id=None, data_file=None, db_file=None):
+                 instance_id=None, data_file=None, db_file=None, api_key=None):
         self.host = host
         self.port = port
         self.zone = zone
         self.instance_id = instance_id or f"i-{socket.gethostname()[:8]}"
+        self.api_key = api_key
         if data_file is None:
             data_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "centers_data.json")
@@ -74,6 +81,7 @@ class ServiceConfig:
             instance_id=os.environ.get("AWS_INSTANCE_ID"),
             data_file=os.environ.get("CENTERS_DATA_FILE"),
             db_file=os.environ.get("CENTERS_DB_FILE"),
+            api_key=os.environ.get("COWIN_API_KEY"),
         )
 
 
@@ -86,10 +94,20 @@ class ServiceState:
         self.request_count = 0
         self.force_unhealthy = False
 
+        self.auth_failures = 0
+
     def record_request(self):
         with self._lock:
             self.request_count += 1
             return self.request_count
+
+    def record_auth_failure(self):
+        with self._lock:
+            self.auth_failures += 1
+
+    def auth_failure_count(self):
+        with self._lock:
+            return self.auth_failures
 
     def set_unhealthy(self, flag):
         with self._lock:
@@ -320,6 +338,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         # Administrative controls to test target health transitions (supports GET and POST)
+        if path in PROTECTED_PATHS and not self._check_auth():
+            return
+
         if path == "/simulate/fail":
             self._simulate_fail()
             return
@@ -414,6 +435,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         path = parsed_url.path
 
         # Administrative controls to test target health transitions
+        if path in PROTECTED_PATHS and not self._check_auth():
+            return
+
         if path == "/simulate/fail":
             self._simulate_fail()
             return
@@ -423,6 +447,28 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         self._write_json({"error": "Unknown POST action"}, status_code=404)
+
+    def _check_auth(self):
+        """Gate mutating endpoints behind the configured API key.
+
+        Returns True when the request may proceed; otherwise writes the
+        JSON 401 and returns False. With no COWIN_API_KEY configured the
+        service runs in dev mode and every request is allowed (a warning
+        is logged at startup).
+        """
+        if self.config.api_key is None:
+            return True
+        supplied = self.headers.get(AUTH_HEADER, "")
+        if hmac.compare_digest(supplied, self.config.api_key):
+            return True
+        self.state.record_auth_failure()
+        logger.warning("Rejected %s %s from %s: missing or invalid API key",
+                       self.command, self.path, self.client_address[0])
+        self._write_json({
+            "error": "Unauthorized",
+            "message": f"A valid {AUTH_HEADER} header is required for this endpoint"
+        }, status_code=401)
+        return False
 
     def _simulate_fail(self):
         self.state.set_unhealthy(True)
@@ -498,6 +544,10 @@ def serve(config, log_level="INFO"):
     logger.info("  Availability Zone : %s", config.zone)
     logger.info("  Instance ID       : %s", config.instance_id)
     logger.info("  Health Endpoint   : http://%s:%d/health", config.host, config.port)
+    if config.api_key is None:
+        logger.warning("COWIN_API_KEY is not set - /simulate/* endpoints are "
+                       "UNAUTHENTICATED (dev mode; set COWIN_API_KEY to require "
+                       "an API key)")
     try:
         httpd.serve_forever()
     finally:
@@ -506,10 +556,12 @@ def serve(config, log_level="INFO"):
 
 
 def run(port=DEFAULT_PORT, zone=DEFAULT_ZONE, instance_id=None,
-        host="0.0.0.0", log_level=None, data_file=None):
+        host="0.0.0.0", log_level=None, data_file=None, db_file=None,
+        api_key=None):
     """Backward-compatible programmatic entry point."""
     config = ServiceConfig(host=host, port=port, zone=zone,
-                           instance_id=instance_id, data_file=data_file)
+                           instance_id=instance_id, data_file=data_file,
+                           db_file=db_file, api_key=api_key)
     serve(config, log_level or os.environ.get("LOG_LEVEL", "INFO"))
 
 
@@ -525,10 +577,15 @@ if __name__ == "__main__":
                         help="Custom instance identifier (env: AWS_INSTANCE_ID)")
     parser.add_argument("--data-file", type=str, default=os.environ.get("CENTERS_DATA_FILE", None),
                         help="Path to centers dataset JSON (env: CENTERS_DATA_FILE)")
+    parser.add_argument("--db-file", type=str, default=os.environ.get("CENTERS_DB_FILE", None),
+                        help="Path to the centers SQLite database (env: CENTERS_DB_FILE)")
+    parser.add_argument("--api-key", type=str, default=os.environ.get("COWIN_API_KEY", None),
+                        help="API key required on mutating endpoints (env: COWIN_API_KEY)")
     parser.add_argument("--log-level", type=str, default=os.environ.get("LOG_LEVEL", "INFO"),
                         help="Logging level (env: LOG_LEVEL)")
     args = parser.parse_args()
 
     config = ServiceConfig(host=args.host, port=args.port, zone=args.zone,
-                           instance_id=args.instance_id, data_file=args.data_file)
+                           instance_id=args.instance_id, data_file=args.data_file,
+                           db_file=args.db_file, api_key=args.api_key)
     serve(config, args.log_level)
