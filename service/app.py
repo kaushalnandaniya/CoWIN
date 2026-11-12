@@ -40,6 +40,10 @@ SERVICE_VERSION = "CoWIN-LookupService/1.0"
 AUTH_HEADER = "X-API-Key"
 PROTECTED_PATHS = frozenset({"/simulate/fail", "/simulate/recover"})
 
+# Paths exempt from rate limiting: ALB health probes and metrics scrapers
+# must never be throttled, or failover detection would break.
+RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/metrics"})
+
 # Sample record served if the centers dataset cannot be loaded.
 FALLBACK_CENTERS = [
     {
@@ -57,12 +61,16 @@ class ServiceConfig:
     """Static configuration resolved from environment variables and CLI args."""
 
     def __init__(self, host="0.0.0.0", port=DEFAULT_PORT, zone=DEFAULT_ZONE,
-                 instance_id=None, data_file=None, db_file=None, api_key=None):
+                 instance_id=None, data_file=None, db_file=None, api_key=None,
+                 rate_limit_rps=0.0, rate_limit_burst=None):
         self.host = host
         self.port = port
         self.zone = zone
         self.instance_id = instance_id or f"i-{socket.gethostname()[:8]}"
         self.api_key = api_key
+        self.rate_limit_rps = float(rate_limit_rps or 0.0)
+        self.rate_limit_burst = (float(rate_limit_burst) if rate_limit_burst
+                                 else None)
         if data_file is None:
             data_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "centers_data.json")
@@ -82,6 +90,9 @@ class ServiceConfig:
             data_file=os.environ.get("CENTERS_DATA_FILE"),
             db_file=os.environ.get("CENTERS_DB_FILE"),
             api_key=os.environ.get("COWIN_API_KEY"),
+            rate_limit_rps=float(os.environ.get("RATE_LIMIT_RPS", 0.0)),
+            rate_limit_burst=(float(os.environ["RATE_LIMIT_BURST"])
+                              if os.environ.get("RATE_LIMIT_BURST") else None),
         )
 
 
@@ -246,6 +257,38 @@ class InMemoryCenterStore:
         pass
 
 
+class RateLimiter:
+    """Simple per-client-IP token bucket (stdlib only).
+
+    Disabled when the configured rate is 0, which is also the default so
+    local demos and the 10 req/s failover benchmark are never throttled.
+    /health and /metrics are exempted at the routing layer so ALB probes
+    and metric scrapers are never limited.
+    """
+
+    def __init__(self, requests_per_second=0.0, burst=None):
+        self.rps = float(requests_per_second or 0.0)
+        self.burst = float(burst) if burst else max(1.0, self.rps * 2)
+        self.enabled = self.rps > 0
+        self._buckets = {}  # client IP -> (tokens, last refill time)
+        self._lock = threading.Lock()
+        self.rejected_total = 0
+
+    def allow(self, client_ip):
+        if not self.enabled:
+            return True
+        now = time.monotonic()
+        with self._lock:
+            tokens, last = self._buckets.get(client_ip, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - last) * self.rps)
+            if tokens >= 1.0:
+                self._buckets[client_ip] = (tokens - 1.0, now)
+                return True
+            self._buckets[client_ip] = (tokens, now)
+            self.rejected_total += 1
+            return False
+
+
 def build_store(config):
     """Create the center store, preferring SQLite with an in-memory fallback."""
     try:
@@ -272,17 +315,21 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
     def store(self):
         return self.server.store
 
-    def _set_headers(self, status_code=200, content_type="application/json"):
+    def _set_headers(self, status_code=200, content_type="application/json",
+                     extra_headers=None):
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("X-Served-By-Zone", self.config.zone)
         self.send_header("X-Instance-Id", self.config.instance_id)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        if extra_headers:
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
         self.end_headers()
 
-    def _write_json(self, body, status_code=200):
-        self._set_headers(status_code)
+    def _write_json(self, body, status_code=200, extra_headers=None):
+        self._set_headers(status_code, extra_headers=extra_headers)
         self.wfile.write(json.dumps(body, indent=2).encode("utf-8"))
 
     def do_OPTIONS(self):
@@ -315,6 +362,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed_url.query)
         zone = self.config.zone
         instance_id = self.config.instance_id
+
+        if not self._check_rate_limit(path):
+            return
 
         # Health Check Endpoint (used by AWS ALB Target Group)
         if path == "/health":
@@ -434,6 +484,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
+        if not self._check_rate_limit(path):
+            return
+
         # Administrative controls to test target health transitions
         if path in PROTECTED_PATHS and not self._check_auth():
             return
@@ -447,6 +500,21 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         self._write_json({"error": "Unknown POST action"}, status_code=404)
+
+    def _check_rate_limit(self, path):
+        """Return True when the request may proceed under the rate limit;
+        otherwise write the JSON 429 and return False."""
+        if path in RATE_LIMIT_EXEMPT_PATHS:
+            return True
+        if self.server.rate_limiter.allow(self.client_address[0]):
+            return True
+        logger.warning("Rate limited %s %s from %s",
+                       self.command, path, self.client_address[0])
+        self._write_json({
+            "error": "Too Many Requests",
+            "message": "Rate limit exceeded - slow down and retry"
+        }, status_code=429, extra_headers={"Retry-After": "1"})
+        return False
 
     def _check_auth(self):
         """Gate mutating endpoints behind the configured API key.
@@ -501,6 +569,8 @@ class CoWINHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.state = ServiceState()
         self.store = build_store(config)
+        self.rate_limiter = RateLimiter(config.rate_limit_rps,
+                                        config.rate_limit_burst)
         super().__init__((config.host, config.port), CoWINLookupHandler)
 
     def server_close(self):
@@ -581,11 +651,21 @@ if __name__ == "__main__":
                         help="Path to the centers SQLite database (env: CENTERS_DB_FILE)")
     parser.add_argument("--api-key", type=str, default=os.environ.get("COWIN_API_KEY", None),
                         help="API key required on mutating endpoints (env: COWIN_API_KEY)")
+    parser.add_argument("--rate-limit-rps", type=float,
+                        default=float(os.environ.get("RATE_LIMIT_RPS", 0.0)),
+                        help="Sustained requests/second allowed per client IP; "
+                             "0 disables limiting (env: RATE_LIMIT_RPS)")
+    parser.add_argument("--rate-limit-burst", type=float,
+                        default=(float(os.environ["RATE_LIMIT_BURST"])
+                                 if os.environ.get("RATE_LIMIT_BURST") else None),
+                        help="Token bucket size per client IP (env: RATE_LIMIT_BURST)")
     parser.add_argument("--log-level", type=str, default=os.environ.get("LOG_LEVEL", "INFO"),
                         help="Logging level (env: LOG_LEVEL)")
     args = parser.parse_args()
 
     config = ServiceConfig(host=args.host, port=args.port, zone=args.zone,
                            instance_id=args.instance_id, data_file=args.data_file,
-                           db_file=args.db_file, api_key=args.api_key)
+                           db_file=args.db_file, api_key=args.api_key,
+                           rate_limit_rps=args.rate_limit_rps,
+                           rate_limit_burst=args.rate_limit_burst)
     serve(config, args.log_level)
