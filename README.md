@@ -116,7 +116,7 @@ docs/             Weekly reports, cost analysis, team work division
 | --- | --- | --- |
 | Kaushal Nandaniya ([@kaushalnandaniya](https://github.com/kaushalnandaniya)) | 202303036 | AWS infrastructure, networking, cost analysis |
 | Darshil Gandhi | 202301056 | Service implementation, testing harness |
-| Jeetrajsinh Gohil ([@jeetrex17](https://github.com/jeetrex17)) | 202303017 | Architecture coordination, reporting, failover analysis, benchmark correctness, service hardening, test tooling, AWS failover evaluation, viva preparation |
+| Jeetrajsinh Gohil ([@jeetrex17](https://github.com/jeetrex17)) | 202303017 | Domain: system architecture, failover analysis, benchmark correctness, service hardening, test tooling, AWS failover evaluation |
 
 Responsibility boundaries and milestone commitments are documented in
 [`docs/team/TEAM_WORK_DIVISION.md`](docs/team/TEAM_WORK_DIVISION.md).
