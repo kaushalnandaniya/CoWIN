@@ -93,5 +93,7 @@ Full documentation in [`docs/week-3/COST_AND_SCALING_ANALYSIS.md`](docs/week-3/C
 
 ---
 
-## 👤 Author & Contact
+## 👥 Authors & Contact
 * **Kaushal Nandaniya** ([@kaushalnandaniya](https://github.com/kaushalnandaniya)) — Student ID: `202303036`
+* **Darshil Gandhi** — Student ID: `202301056`
+* **Jeetrajsinh Gohil** ([@jeetrex17](https://github.com/jeetrex17)) — Student ID: `202303017`
