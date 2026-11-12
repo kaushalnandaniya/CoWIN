@@ -2,8 +2,8 @@
   "benchmark_metadata": {
     "course": "IT457 Cloud Computing",
     "project": "CoWIN Two-Zone High Availability PoC",
-    "date": "2026-11-04 12:27:15",
-    "target_url": "http://localhost:8080",
+    "date": "2026-11-12 13:00:48",
+    "target_url": "http://localhost:9000",
     "duration_seconds": 32,
     "request_rate_rps": 10
   },
@@ -15,25 +15,27 @@
     "error_rate_percent": 0.0
   },
   "latency_percentiles_ms": {
-    "min": 1.69,
-    "mean": 4.15,
-    "p50": 3.73,
-    "p90": 6.14,
-    "p95": 7.71,
-    "p99": 9.32,
-    "max": 18.22
+    "min": 0.89,
+    "mean": 1.14,
+    "p50": 1.07,
+    "p90": 1.42,
+    "p95": 1.59,
+    "p99": 1.92,
+    "max": 2.52
   },
   "traffic_distribution": {
-    "zone_a_ap_south_1a_requests": 102,
-    "zone_b_ap_south_1b_requests": 218,
-    "zone_a_share_percent": 31.9,
-    "zone_b_share_percent": 68.1
+    "zone_a_ap_south_1a_requests": 100,
+    "zone_b_ap_south_1b_requests": 220,
+    "zone_a_share_percent": 31.2,
+    "zone_b_share_percent": 68.8
   },
   "availability_and_failover": {
     "failure_injected_at_second": 10.0,
-    "failover_achieved": false,
+    "failover_achieved": true,
+    "failover_time_seconds": 2.1,
     "disruption_window_seconds": 0.0,
-    "recovery_time_objective_rto_seconds": 0.0,
+    "failed_requests_during_experiment": 0,
+    "recovery_time_objective_rto_seconds": 2.1,
     "recovery_point_objective_rpo": "0 seconds (Read/Lookup Service Stateless)",
     "survivor_zone": "ap-south-1b",
     "post_failover_availability_percent": 100.0
