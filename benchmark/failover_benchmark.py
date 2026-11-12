@@ -33,6 +33,84 @@ def percentile(data, p):
     return round(sorted_data[f], 2)
 
 
+class FailoverTracker:
+    """Failure/recovery state transitions observed during a benchmark run.
+
+    Failover = post-injection convergence of ALL traffic onto one surviving
+    zone. A health-check-driven eviction is graceful: in-flight requests to
+    the degraded node can keep succeeding, so detection must NOT depend on
+    observing a failed request. Round-robin alternates zones strictly, so 5
+    consecutive successful responses from a single zone only happen once the
+    failed target has been evicted from the pool.
+    """
+
+    CONVERGENCE_WINDOW = 5
+
+    def __init__(self):
+        self.t_failure_injected = None
+        self.t_first_disruption = None
+        self.t_last_disruption = None
+        self.t_failover_completed = None
+        self.t_recovery_injected = None
+        self.t_rebalanced = None
+        self.survivor_zone = None
+        self._recent = []  # trailing (success, zone) pairs used for convergence
+
+    def note_failure_injected(self, when):
+        self.t_failure_injected = when
+
+    def note_recovery_injected(self, when):
+        self.t_recovery_injected = when
+
+    def observe(self, success, zone, when):
+        """Record one completed request; return events that it triggered.
+
+        Events, in the order they should be reported: "first_disruption",
+        "failover", "rebalanced".
+        """
+        events = []
+
+        if self.t_failure_injected and not success:
+            if not self.t_first_disruption:
+                self.t_first_disruption = when
+                events.append("first_disruption")
+            self.t_last_disruption = when
+
+        if self.t_failure_injected and not self.t_failover_completed:
+            window = self._recent[-(self.CONVERGENCE_WINDOW - 1):]
+            recent_success = [s for s, _ in window] + [success]
+            recent_zones = [z for _, z in window] + [zone]
+            if (len(recent_success) == self.CONVERGENCE_WINDOW and all(recent_success)
+                    and len(set(recent_zones)) == 1 and recent_zones[0] != "unknown"):
+                self.t_failover_completed = when
+                self.survivor_zone = recent_zones[0]
+                events.append("failover")
+
+        if self.t_recovery_injected and not self.t_rebalanced:
+            if self.survivor_zone and zone != self.survivor_zone and zone != "unknown" and success:
+                self.t_rebalanced = when
+                events.append("rebalanced")
+
+        self._recent.append((success, zone))
+        return events
+
+    def failover_time_seconds(self):
+        """Failure injection -> traffic fully converged on the survivor zone
+        (health-check detection + target eviction + reroute). None if failover
+        was never observed."""
+        if self.t_failure_injected and self.t_failover_completed:
+            return round(self.t_failover_completed - self.t_failure_injected, 2)
+        return None
+
+    def disruption_window_seconds(self):
+        """The span in which user-facing requests actually FAILED. A graceful
+        ALB eviction can legitimately be 0.0 here - the degraded node kept
+        serving 200s until the health checker evicted it."""
+        if self.t_first_disruption and self.t_last_disruption:
+            return round(self.t_last_disruption - self.t_first_disruption, 2)
+        return 0.0  # no request ever failed: zero-downtime failover
+
+
 def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=True,
                   fail_url="http://127.0.0.1:8081/simulate/fail",
                   recover_url="http://127.0.0.1:8081/simulate/recover"):
@@ -49,13 +127,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
     records = []
     
     t_start = time.time()
-    t_failure_injected = None
-    t_first_disruption = None
-    t_last_disruption = None
-    t_failover_completed = None
-    t_recovery_injected = None
-    t_rebalanced = None
-    survivor_zone = None
+    tracker = FailoverTracker()
 
     failure_injected = False
     recovery_injected = False
@@ -69,7 +141,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         # Phase 2: Inject failure at t = 10s
         if trigger_failure and elapsed >= 10.0 and not failure_injected:
             failure_injected = True
-            t_failure_injected = time.time()
+            tracker.note_failure_injected(time.time())
             print(f"\n⚡ [{elapsed:.1f}s] INJECTING FAILURE: Simulating Zone A EC2 Health Check Degradation (HTTP 500)...")
             try:
                 req_f = urllib.request.Request(fail_url, data=b"{}")
@@ -80,7 +152,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         # Phase 4: Recover at t = 22s
         if trigger_failure and elapsed >= 22.0 and not recovery_injected:
             recovery_injected = True
-            t_recovery_injected = time.time()
+            tracker.note_recovery_injected(time.time())
             print(f"\n🔄 [{elapsed:.1f}s] TRIGGERING RECOVERY: Restoring Zone A Instance to Healthy State...")
             try:
                 req_r = urllib.request.Request(recover_url, data=b"{}")
@@ -120,32 +192,14 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         req_latency = (time.time() - req_start) * 1000  # ms
 
         # Track failure & recovery state transitions
-        if t_failure_injected and not success:
-            if not t_first_disruption:
-                t_first_disruption = time.time()
+        for event in tracker.observe(success, zone_served, time.time()):
+            if event == "first_disruption":
                 print(f"   ⚠️ [{elapsed:.2f}s] First request error detected: {status_code} ({error_msg})")
-            t_last_disruption = time.time()
-
-        # Failover = post-injection convergence of ALL traffic onto one surviving
-        # zone. A health-check-driven eviction is graceful: in-flight requests to
-        # the degraded node can keep succeeding, so detection must NOT depend on
-        # observing a failed request. Round-robin alternates zones strictly, so 5
-        # consecutive successful responses from a single zone only happen once the
-        # failed target has been evicted from the pool.
-        if t_failure_injected and not t_failover_completed:
-            recent_success = [r["success"] for r in records[-4:]] + [success]
-            recent_zones = [r["zone"] for r in records[-4:]] + [zone_served]
-            if (len(recent_success) == 5 and all(recent_success)
-                    and len(set(recent_zones)) == 1 and recent_zones[0] != "unknown"):
-                t_failover_completed = time.time()
-                survivor_zone = recent_zones[0]
-                failover_secs = t_failover_completed - t_failure_injected
-                print(f"   ✅ [{elapsed:.2f}s] FAILOVER ACHIEVED: 100% traffic rerouted to {survivor_zone}!")
+            elif event == "failover":
+                failover_secs = tracker.t_failover_completed - tracker.t_failure_injected
+                print(f"   ✅ [{elapsed:.2f}s] FAILOVER ACHIEVED: 100% traffic rerouted to {tracker.survivor_zone}!")
                 print(f"      Failover Time (inject -> fully rerouted): {failover_secs:.2f} seconds")
-
-        if t_recovery_injected and not t_rebalanced:
-            if survivor_zone and zone_served != survivor_zone and zone_served != "unknown" and success:
-                t_rebalanced = time.time()
+            elif event == "rebalanced":
                 print(f"   🎉 [{elapsed:.2f}s] RE-BALANCING VERIFIED: recovered target re-admitted to ALB pool!")
 
         # Categorize test phase
@@ -204,13 +258,10 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
     # 2. Disruption window: the span in which user-facing requests actually
     #    FAILED. A graceful ALB eviction can legitimately be 0.0s here - the
     #    degraded node kept serving 200s until the health checker evicted it.
-    failover_time = round((t_failover_completed - t_failure_injected), 2) if (t_failure_injected and t_failover_completed) else None
-    if t_first_disruption and t_last_disruption:
-        disruption_window = round(t_last_disruption - t_first_disruption, 2)
-    else:
-        disruption_window = 0.0  # no request ever failed: zero-downtime failover
+    failover_time = tracker.failover_time_seconds()
+    disruption_window = tracker.disruption_window_seconds()
 
-    post_injection = [r for r in records if t_failure_injected and r["timestamp"] >= t_failure_injected]
+    post_injection = [r for r in records if tracker.t_failure_injected and r["timestamp"] >= tracker.t_failure_injected]
     post_failover_availability = round(
         (sum(1 for r in post_injection if r["success"]) / len(post_injection)) * 100, 2
     ) if post_injection else 0.0
@@ -248,13 +299,13 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         },
         "availability_and_failover": {
             "failure_injected_at_second": 10.0,
-            "failover_achieved": t_failover_completed is not None,
+            "failover_achieved": tracker.t_failover_completed is not None,
             "failover_time_seconds": failover_time,
             "disruption_window_seconds": disruption_window,
             "failed_requests_during_experiment": len(failed_reqs),
             "recovery_time_objective_rto_seconds": failover_time,
             "recovery_point_objective_rpo": "0 seconds (Read/Lookup Service Stateless)",
-            "survivor_zone": survivor_zone,
+            "survivor_zone": tracker.survivor_zone,
             "post_failover_availability_percent": post_failover_availability
         }
     }
@@ -282,14 +333,14 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
     print(f"  • Zone B (ap-south-1b) : {zone_b_count:3d} requests ({summary['traffic_distribution']['zone_b_share_percent']}%)")
     print("-" * 75)
     print("FAILOVER & DISASTER RECOVERY METRICS:")
-    print(f"  • Failover Achieved          : {t_failover_completed is not None}")
+    print(f"  • Failover Achieved          : {tracker.t_failover_completed is not None}")
     if failover_time is not None:
         print(f"  • Failover Time (detect+reroute): {failover_time:.2f} seconds")
     print(f"  • Disruption Window (errors) : {disruption_window:.2f} seconds ({len(failed_reqs)} failed requests)")
     print(f"  • Measured RTO               : {failover_time:.2f} seconds" if failover_time is not None else "  • Measured RTO               : n/a (failover not observed)")
     print(f"  • Measured RPO               : 0 seconds (Stateless read architecture)")
-    if survivor_zone:
-        print(f"  • Survivor Zone Continuity   : 100% requests absorbed by {survivor_zone} during failure")
+    if tracker.survivor_zone:
+        print(f"  • Survivor Zone Continuity   : 100% requests absorbed by {tracker.survivor_zone} during failure")
     print("=" * 75)
 
     # Save output artifacts
