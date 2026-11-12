@@ -41,6 +41,9 @@ Per the course guide and instructor clarification (dated 22 October 2026):
   * Review deployed two-zone AWS architecture and verify security group boundaries.
   * Coordinate the live failover demonstration and record transition observations.
   * Document failure detection timestamps, RTO/RPO analysis, and recovery behavior in the report.
+* **Additional contributions (beyond the planned division):**
+  * Diagnosed and fixed the failover detection logic in the local benchmark; verified end-to-end with failover in ~2.1 s and zero failed requests (merged, [PR #1](https://github.com/kaushalnandaniya/CoWIN/pull/1)).
+  * Hardened the lookup service (structured logging, graceful shutdown, threaded serving, JSON error handling) and added a 16-test stdlib suite with Makefile targets, verified end-to-end against the failover benchmark (in review, [PR #3](https://github.com/kaushalnandaniya/CoWIN/pull/3)).
 
 ---
 
