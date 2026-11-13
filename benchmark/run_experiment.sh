@@ -7,7 +7,7 @@
 #   ALB_PORT=9000 ZONE_A_PORT=9001 ZONE_B_PORT=9002 ./run_experiment.sh
 # =============================================================================
 
-set -e
+set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$DIR")"
@@ -16,7 +16,11 @@ ALB_PORT="${ALB_PORT:-8080}"
 ZONE_A_PORT="${ZONE_A_PORT:-8081}"
 ZONE_B_PORT="${ZONE_B_PORT:-8082}"
 
-LOG_DIR="$(mktemp -d /tmp/cowin-experiment-logs.XXXXXX)"
+RUN_DIR="${RUN_DIR:-$(mktemp -d /tmp/cowin-run.XXXXXX)}"
+mkdir -p "$RUN_DIR"
+LOG_DIR="$RUN_DIR/logs"
+mkdir -p "$LOG_DIR"
+PID_INST_A=""; PID_INST_B=""; PID_ALB=""
 
 echo "======================================================================="
 echo "   STARTING COWIN TWO-ZONE HIGH AVAILABILITY EXPERIMENT ENVIRONMENT    "
@@ -26,13 +30,18 @@ echo "   Service logs: $LOG_DIR"
 
 cleanup() {
     echo -e "\n🧹 Tearing down local processes..."
-    kill $PID_INST_A 2>/dev/null || true
-    kill $PID_INST_B 2>/dev/null || true
-    kill $PID_ALB 2>/dev/null || true
+    for pid in "$PID_INST_A" "$PID_INST_B" "$PID_ALB"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
     echo "✅ Cleaned up all background services."
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail_with_logs() {
     echo ""
@@ -60,14 +69,14 @@ wait_for_endpoint() {
 
 # 1. Start Node Zone A
 echo "▶️  Starting Lookup Service Node A (Zone: ap-south-1a) on port $ZONE_A_PORT..."
-AWS_AZ="ap-south-1a" AWS_INSTANCE_ID="i-0a1b2c3d-zone-a" \
+CENTERS_DB_FILE="$RUN_DIR/zone-a.db" AWS_AZ="ap-south-1a" AWS_INSTANCE_ID="i-0a1b2c3d-zone-a" \
     python3 "$PROJECT_ROOT/service/app.py" --port "$ZONE_A_PORT" --zone ap-south-1a \
     > "$LOG_DIR/zone_a.log" 2>&1 &
 PID_INST_A=$!
 
 # 2. Start Node Zone B
 echo "▶️  Starting Lookup Service Node B (Zone: ap-south-1b) on port $ZONE_B_PORT..."
-AWS_AZ="ap-south-1b" AWS_INSTANCE_ID="i-0e5f6g7h-zone-b" \
+CENTERS_DB_FILE="$RUN_DIR/zone-b.db" AWS_AZ="ap-south-1b" AWS_INSTANCE_ID="i-0e5f6g7h-zone-b" \
     python3 "$PROJECT_ROOT/service/app.py" --port "$ZONE_B_PORT" --zone ap-south-1b \
     > "$LOG_DIR/zone_b.log" 2>&1 &
 PID_INST_B=$!
@@ -95,6 +104,9 @@ python3 "$DIR/failover_benchmark.py" \
     --url "http://localhost:$ALB_PORT" \
     --fail-url "http://127.0.0.1:$ZONE_A_PORT/simulate/fail" \
     --recover-url "http://127.0.0.1:$ZONE_A_PORT/simulate/recover" \
-    --duration 32 --rps 10
+    --duration 32 --rps 10 --environment local-simulator --output-dir "$RUN_DIR"
+
+python3 "$DIR/generate_plots.py" --run-dir "$RUN_DIR"
+echo "Evidence directory: $RUN_DIR"
 
 echo "✅ Experiment completed successfully!"

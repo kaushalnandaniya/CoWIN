@@ -1,0 +1,80 @@
+{
+  "benchmark_metadata": {
+    "schema_version": 2,
+    "environment": "local-simulator",
+    "started_at_utc": "2026-11-13T12:56:59.266615+00:00",
+    "target_url": "http://localhost:19000",
+    "requested_duration_seconds": 32.0,
+    "actual_duration_seconds": 32.0,
+    "request_rate_rps": 10.0,
+    "achieved_rps": 10.0,
+    "sampler": "sequential; target rate is an upper bound",
+    "failure_mode": "health-degradation",
+    "failed_zone": "ap-south-1a",
+    "convergence_window": 5
+  },
+  "throughput_metrics": {
+    "total_requests": 320,
+    "successful_requests": 320,
+    "failed_requests": 0,
+    "success_rate_percent": 100.0
+  },
+  "latency_percentiles_ms": {
+    "p50": 2.07,
+    "p90": 2.51,
+    "p95": 2.67,
+    "p99": 3.32,
+    "min": 1.59,
+    "max": 4.422,
+    "mean": 2.129
+  },
+  "traffic_distribution": {
+    "ap-south-1a": 99,
+    "ap-south-1b": 221
+  },
+  "availability_and_failover": {
+    "two_zone_baseline_observed": true,
+    "failover_achieved": true,
+    "failover_time_seconds": 2.11,
+    "disruption_window_seconds": 0.0,
+    "stable_service_resumption_seconds": 0.0,
+    "recovery_observed": true,
+    "survivor_zone": "ap-south-1b",
+    "rpo": "not measured; this read-only test does not validate database replication",
+    "measurement_note": "Survivor streak is a client estimate, not ALB health detection or guaranteed RTO. Disruption span is first-to-last failed sample, which can be zero for one error. Stable resumption measures first error to a successful survivor streak. Absence of samples cannot prove availability."
+  },
+  "events": [
+    {
+      "event": "failure",
+      "timestamp": 1794574629.2825713,
+      "elapsed_s": 10.016,
+      "source": "local-health-simulation",
+      "note": ""
+    },
+    {
+      "event": "failover",
+      "timestamp": 1794574631.3891695,
+      "elapsed_s": 12.123,
+      "source": "client-observation"
+    },
+    {
+      "event": "recovery",
+      "timestamp": 1794574641.3040924,
+      "elapsed_s": 22.037,
+      "source": "local-health-simulation",
+      "note": ""
+    },
+    {
+      "event": "rebalanced",
+      "timestamp": 1794574643.3097208,
+      "elapsed_s": 24.043,
+      "source": "client-observation"
+    }
+  ],
+  "injection_errors": [],
+  "limitations": [
+    "No AWS health snapshots or video collected by this client.",
+    "Local simulation changes health only; it does not stop an EC2 instance.",
+    "Sequential sampling can miss short disruptions and cannot guarantee offered load."
+  ]
+}

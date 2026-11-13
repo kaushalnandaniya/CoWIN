@@ -12,6 +12,9 @@ Tests and measures:
 """
 
 import argparse
+import collections
+import math
+import tempfile
 import csv
 import json
 import os
@@ -36,17 +39,18 @@ def percentile(data, p):
 class FailoverTracker:
     """Failure/recovery state transitions observed during a benchmark run.
 
-    Failover = post-injection convergence of ALL traffic onto one surviving
-    zone. A health-check-driven eviction is graceful: in-flight requests to
-    the degraded node can keep succeeding, so detection must NOT depend on
-    observing a failed request. Round-robin alternates zones strictly, so 5
-    consecutive successful responses from a single zone only happen once the
-    failed target has been evicted from the pool.
+    Estimate convergence from five successful samples on a non-failed zone.
+    Reset history at injection. This is deterministic in the local round-robin
+    simulator, but is only a client observation on AWS, where traffic need not
+    alternate strictly. Verify ALB target health independently.
     """
 
     CONVERGENCE_WINDOW = 5
 
-    def __init__(self):
+    def __init__(self, failed_zone=None):
+        self.failed_zone = failed_zone
+        self.t_stable_resumption = None
+        self._success_streak = 0
         self.t_failure_injected = None
         self.t_first_disruption = None
         self.t_last_disruption = None
@@ -54,10 +58,11 @@ class FailoverTracker:
         self.t_recovery_injected = None
         self.t_rebalanced = None
         self.survivor_zone = None
-        self._recent = []  # trailing (success, zone) pairs used for convergence
+        self._recent = collections.deque(maxlen=self.CONVERGENCE_WINDOW)
 
     def note_failure_injected(self, when):
         self.t_failure_injected = when
+        self._recent.clear()
 
     def note_recovery_injected(self, when):
         self.t_recovery_injected = when
@@ -70,27 +75,34 @@ class FailoverTracker:
         """
         events = []
 
-        if self.t_failure_injected and not success:
-            if not self.t_first_disruption:
+        if self.t_failure_injected is not None and not success:
+            if self.t_first_disruption is None:
                 self.t_first_disruption = when
                 events.append("first_disruption")
             self.t_last_disruption = when
 
-        if self.t_failure_injected and not self.t_failover_completed:
-            window = self._recent[-(self.CONVERGENCE_WINDOW - 1):]
+        if self.t_failure_injected is not None and self.t_failover_completed is None and self.t_recovery_injected is None:
+            window = list(self._recent)[-(self.CONVERGENCE_WINDOW - 1):]
             recent_success = [s for s, _ in window] + [success]
             recent_zones = [z for _, z in window] + [zone]
             if (len(recent_success) == self.CONVERGENCE_WINDOW and all(recent_success)
-                    and len(set(recent_zones)) == 1 and recent_zones[0] != "unknown"):
+                    and len(set(recent_zones)) == 1 and recent_zones[0] not in {"unknown", self.failed_zone}):
                 self.t_failover_completed = when
                 self.survivor_zone = recent_zones[0]
                 events.append("failover")
 
-        if self.t_recovery_injected and not self.t_rebalanced:
-            if self.survivor_zone and zone != self.survivor_zone and zone != "unknown" and success:
+        if self.t_recovery_injected is not None and self.t_rebalanced is None:
+            if self.survivor_zone and zone != self.survivor_zone and zone != "unknown" and success and (self.failed_zone is None or zone == self.failed_zone):
                 self.t_rebalanced = when
                 events.append("rebalanced")
 
+        if self.t_first_disruption is not None:
+            survivor_ok = success and zone != "unknown" and zone != self.failed_zone
+            self._success_streak = self._success_streak + 1 if survivor_ok else 0
+            if not survivor_ok:
+                self.t_stable_resumption = None
+            elif self._success_streak >= self.CONVERGENCE_WINDOW and self.t_stable_resumption is None:
+                self.t_stable_resumption = when
         self._recent.append((success, zone))
         return events
 
@@ -98,7 +110,7 @@ class FailoverTracker:
         """Failure injection -> traffic fully converged on the survivor zone
         (health-check detection + target eviction + reroute). None if failover
         was never observed."""
-        if self.t_failure_injected and self.t_failover_completed:
+        if self.t_failure_injected is not None and self.t_failover_completed is not None:
             return round(self.t_failover_completed - self.t_failure_injected, 2)
         return None
 
@@ -106,278 +118,232 @@ class FailoverTracker:
         """The span in which user-facing requests actually FAILED. A graceful
         ALB eviction can legitimately be 0.0 here - the degraded node kept
         serving 200s until the health checker evicted it."""
-        if self.t_first_disruption and self.t_last_disruption:
+        if self.t_first_disruption is not None and self.t_last_disruption is not None:
             return round(self.t_last_disruption - self.t_first_disruption, 2)
         return 0.0  # no request ever failed: zero-downtime failover
 
 
+    def resumption_seconds(self):
+        if self.t_first_disruption is None:
+            return 0.0
+        if self.t_stable_resumption is None:
+            return None
+        return round(self.t_stable_resumption - self.t_first_disruption, 3)
+
+
 def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=True,
                   fail_url="http://127.0.0.1:8081/simulate/fail",
-                  recover_url="http://127.0.0.1:8081/simulate/recover"):
-    print("=" * 75)
-    print("   IT457 CLOUD COMPUTING: COWIN TWO-ZONE FAILOVER EXPERIMENT")
-    print("=" * 75)
-    print(f"Target URL            : {target_url}")
-    print(f"Test Duration         : {total_seconds} seconds")
-    print(f"Request Rate          : {req_per_sec} requests/second")
-    print(f"Failure Injection     : {'Automated at t=10s' if trigger_failure else 'Manual'}")
-    print("=" * 75)
+                  recover_url="http://127.0.0.1:8081/simulate/recover",
+                  output_dir=None, environment="local-simulator", events_file=None,
+                  failed_zone="ap-south-1a", timeout=1.5, fail_at=10.0,
+                  recover_at=22.0):
+    """Collect sequential HTTP samples; never operate AWS resources.
 
-    interval = 1.0 / req_per_sec
-    records = []
-    
-    t_start = time.time()
-    tracker = FailoverTracker()
+    Auto mode only changes loopback simulator health. For AWS, an operator
+    records accepted stop/start commands in an event file. Detection is an
+    observed survivor-response streak, not proof of ALB target health or RTO.
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from urllib.parse import urlparse
 
-    failure_injected = False
-    recovery_injected = False
+    if any(not math.isfinite(v) or v <= 0 for v in (total_seconds, req_per_sec, timeout)):
+        raise ValueError("duration, rps and timeout must be positive")
+    parsed = urlparse(target_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+        raise ValueError("target must be an HTTP(S) URL without credentials")
+    if environment not in {"local-simulator", "aws"}:
+        raise ValueError("environment must be local-simulator or aws")
+    if trigger_failure:
+        if environment != "local-simulator":
+            raise ValueError("AWS requires --no-auto-fail; resource actions are operator-owned")
+        for url in (target_url, fail_url, recover_url):
+            if urlparse(url).hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError("automatic health injection is limited to loopback URLs")
+        if not 0 <= fail_at < recover_at < total_seconds:
+            raise ValueError("require 0 <= fail-at < recover-at < duration")
+    out = Path(output_dir or tempfile.mkdtemp(prefix="cowin-benchmark-"))
+    out.mkdir(parents=True, exist_ok=True)
+    paths = [out / name for name in ("benchmark_requests.csv", "benchmark_results.json")]
+    if any(path.exists() for path in paths):
+        raise ValueError("output already contains benchmark artifacts; choose a new directory")
+    tracker = FailoverTracker(failed_zone=failed_zone)
+    records, events, injection_errors = [], [], []
+    start_epoch, start_clock = time.time(), time.monotonic()
+    attempted = set()
+    api_key = os.environ.get("COWIN_API_KEY")
 
-    print("\n[Phase 1] 0s - 10s: Baseline Dual-Zone Traffic Running...")
-
-    for i in range(total_seconds * req_per_sec):
-        elapsed = time.time() - t_start
-        req_start = time.time()
-
-        # Phase 2: Inject failure at t = 10s
-        if trigger_failure and elapsed >= 10.0 and not failure_injected:
-            failure_injected = True
-            tracker.note_failure_injected(time.time())
-            print(f"\n⚡ [{elapsed:.1f}s] INJECTING FAILURE: Simulating Zone A EC2 Health Check Degradation (HTTP 500)...")
-            try:
-                req_f = urllib.request.Request(fail_url, data=b"{}")
-                urllib.request.urlopen(req_f, timeout=1.0)
-            except Exception as e:
-                print(f"   (Failed to contact Zone A directly: {e})")
-
-        # Phase 4: Recover at t = 22s
-        if trigger_failure and elapsed >= 22.0 and not recovery_injected:
-            recovery_injected = True
-            tracker.note_recovery_injected(time.time())
-            print(f"\n🔄 [{elapsed:.1f}s] TRIGGERING RECOVERY: Restoring Zone A Instance to Healthy State...")
-            try:
-                req_r = urllib.request.Request(recover_url, data=b"{}")
-                urllib.request.urlopen(req_r, timeout=1.0)
-            except Exception as e:
-                print(f"   (Failed to contact Zone A directly: {e})")
-
-        # Send request to Load Balancer
-        req = urllib.request.Request(
-            f"{target_url}/api/v1/centers?district=Ahmedabad",
-            headers={"User-Agent": "CoWIN-FailoverBenchmark/1.0"}
-        )
-        
-        status_code = None
-        zone_served = "unknown"
-        instance_id = "unknown"
-        error_msg = ""
-        success = False
-
-        try:
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                status_code = resp.status
-                zone_served = resp.headers.get("X-Served-By-Zone") or resp.headers.get("X-ALB-Zone", "unknown")
-                instance_id = resp.headers.get("X-Instance-Id") or resp.headers.get("X-ALB-Target", "unknown")
-                if status_code == 200:
-                    success = True
-        except HTTPError as e:
-            status_code = e.code
-            error_msg = f"HTTP {e.code}"
-        except URLError as e:
-            status_code = 502
-            error_msg = str(e.reason)
-        except Exception as e:
-            status_code = 500
-            error_msg = str(e)
-
-        req_latency = (time.time() - req_start) * 1000  # ms
-
-        # Track failure & recovery state transitions
-        for event in tracker.observe(success, zone_served, time.time()):
-            if event == "first_disruption":
-                print(f"   ⚠️ [{elapsed:.2f}s] First request error detected: {status_code} ({error_msg})")
-            elif event == "failover":
-                failover_secs = tracker.t_failover_completed - tracker.t_failure_injected
-                print(f"   ✅ [{elapsed:.2f}s] FAILOVER ACHIEVED: 100% traffic rerouted to {tracker.survivor_zone}!")
-                print(f"      Failover Time (inject -> fully rerouted): {failover_secs:.2f} seconds")
-            elif event == "rebalanced":
-                print(f"   🎉 [{elapsed:.2f}s] RE-BALANCING VERIFIED: recovered target re-admitted to ALB pool!")
-
-        # Categorize test phase
-        if elapsed < 10.0:
-            phase = "1_Baseline"
-        elif elapsed < 15.0:
-            phase = "2_FailureTransition"
-        elif elapsed < 24.0:
-            phase = "3_SteadyFailover"
-        elif elapsed < 29.0:
-            phase = "4_RecoveryTransition"
+    def note(event, timestamp, source, note=""):
+        if event not in {"failure", "recovery"} or timestamp < start_epoch:
+            return
+        if event == "failure" and tracker.t_failure_injected is None:
+            tracker.note_failure_injected(timestamp)
+        elif event == "recovery" and tracker.t_failure_injected is not None and tracker.t_recovery_injected is None and timestamp >= tracker.t_failure_injected:
+            tracker.note_recovery_injected(timestamp)
         else:
-            phase = "5_Rebalanced"
+            return
+        events.append({"event": event, "timestamp": timestamp,
+                       "elapsed_s": round(timestamp - start_epoch, 3),
+                       "source": source, "note": note})
 
-        record = {
-            "req_id": i + 1,
-            "timestamp": round(time.time(), 3),
-            "elapsed_s": round(elapsed, 2),
-            "phase": phase,
-            "status_code": status_code,
-            "success": success,
-            "latency_ms": round(req_latency, 2),
-            "zone": zone_served,
-            "instance_id": instance_id,
-            "error": error_msg
-        }
-        records.append(record)
+    def read_events():
+        if not events_file:
+            return
+        path = Path(events_file)
+        if not path.exists():
+            return
+        if path.stat().st_size > 1024 * 1024:
+            raise ValueError("events file exceeds 1 MiB")
+        # A writer can be between write() calls: ignore an incomplete last line.
+        for line in path.read_text().splitlines(keepends=True):
+            if not line.endswith("\n"):
+                continue
+            entry = json.loads(line)
+            stamp = float(entry["timestamp"])
+            if not math.isfinite(stamp) or stamp > time.time():
+                raise ValueError("invalid/future event timestamp")
+            note(entry["event"], stamp, "operator-event-file", entry.get("note", ""))
 
-        # Print live ticker
-        if (i + 1) % (req_per_sec * 3) == 0:
-            status_icon = "🟢" if success else "🔴"
-            print(f"   {status_icon} [{elapsed:4.1f}s] Req #{i+1:3d} | Zone: {zone_served:12s} | Status: {status_code} | Latency: {req_latency:5.1f}ms")
-
-        # Regulate request rate
-        sleep_time = interval - (time.time() - req_start)
-        if sleep_time > 0:
-            time.sleep(sleep_time)
-
-    # =========================================================================
-    # STATISTICAL ANALYSIS & COMPUTATION
-    # =========================================================================
-    total_reqs = len(records)
-    successful_reqs = [r for r in records if r["success"]]
-    failed_reqs = [r for r in records if not r["success"]]
+    print(f"Environment: {environment}; target: {target_url}; output: {out}")
+    fields = ["req_id", "timestamp", "timestamp_utc", "elapsed_s", "phase",
+              "status_code", "success", "latency_ms", "zone", "instance_id", "error"]
+    # Flush each row so partial evidence survives interruption.
+    with paths[0].open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        while time.monotonic() - start_clock < total_seconds:
+            elapsed = time.monotonic() - start_clock
+            if trigger_failure:
+                for kind, at, url in (("failure", fail_at, fail_url),
+                                      ("recovery", recover_at, recover_url)):
+                    if elapsed >= at and kind not in attempted:
+                        attempted.add(kind)
+                        headers = {"X-API-Key": api_key} if api_key else {}
+                        try:
+                            with urllib.request.urlopen(urllib.request.Request(
+                                    url, data=b"{}", headers=headers), timeout=timeout) as resp:
+                                if resp.status != 200:
+                                    raise ValueError(f"HTTP {resp.status}")
+                            note(kind, time.time(), "local-health-simulation")
+                        except Exception as exc:
+                            injection_errors.append({"event": kind, "error": str(exc)})
+            read_events()
+            request_start = time.perf_counter()
+            status, zone, instance, error = None, "unknown", "unknown", ""
+            success = False
+            req = urllib.request.Request(
+                target_url.rstrip("/") + "/api/v1/centers?district=Ahmedabad",
+                headers={"User-Agent": "CoWIN-FailoverBenchmark/2.0"})
+            try:
+                remaining = max(0.001, total_seconds - (time.monotonic() - start_clock))
+                with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
+                    status = resp.status
+                    zone = resp.headers.get("X-Served-By-Zone", "unknown")
+                    instance = resp.headers.get("X-Instance-Id", "unknown")
+                    body = json.loads(resp.read())
+                    success = status == 200 and isinstance(body, dict) and isinstance(body.get("centers"), list)
+                    if not success:
+                        error = "response did not match lookup contract"
+            except HTTPError as exc:
+                status, error = exc.code, f"HTTP {exc.code}"
+            except Exception as exc:
+                error = str(exc)
+            latency = (time.perf_counter() - request_start) * 1000
+            stamp = time.time()
+            observed = tracker.observe(success, zone, stamp)
+            for event in observed:
+                events.append({"event": event, "timestamp": stamp,
+                               "elapsed_s": round(stamp - start_epoch, 3),
+                               "source": "client-observation"})
+            phase = ("recovery" if tracker.t_recovery_injected is not None else
+                     "failure" if tracker.t_failure_injected is not None else "baseline")
+            row = dict(zip(fields, [len(records) + 1, stamp,
+                datetime.fromtimestamp(stamp, timezone.utc).isoformat(),
+                round(stamp - start_epoch, 3), phase, status, success,
+                round(latency, 3), zone, instance, error]))
+            records.append(row)
+            writer.writerow(row)
+            handle.flush()
+            # No catch-up bursts: this is a sequential sampler, not a stress generator.
+            delay = min(1 / req_per_sec - (time.perf_counter() - request_start),
+                        total_seconds - (time.monotonic() - start_clock))
+            if delay > 0:
+                time.sleep(delay)
+    elapsed = time.monotonic() - start_clock
+    ok = [r for r in records if r["success"]]
     latencies = [r["latency_ms"] for r in records]
-    success_latencies = [r["latency_ms"] for r in successful_reqs]
-
-    zone_a_count = sum(1 for r in successful_reqs if r["zone"] == "ap-south-1a")
-    zone_b_count = sum(1 for r in successful_reqs if r["zone"] == "ap-south-1b")
-
-    # Two distinct measurements (previously conflated, which reported
-    # failover_achieved=false and a 0.0s window on every graceful failover):
-    #
-    # 1. Failover time: failure injection -> traffic fully converged on the
-    #    surviving zone (health-check detection + target eviction + reroute).
-    # 2. Disruption window: the span in which user-facing requests actually
-    #    FAILED. A graceful ALB eviction can legitimately be 0.0s here - the
-    #    degraded node kept serving 200s until the health checker evicted it.
-    failover_time = tracker.failover_time_seconds()
-    disruption_window = tracker.disruption_window_seconds()
-
-    post_injection = [r for r in records if tracker.t_failure_injected and r["timestamp"] >= tracker.t_failure_injected]
-    post_failover_availability = round(
-        (sum(1 for r in post_injection if r["success"]) / len(post_injection)) * 100, 2
-    ) if post_injection else 0.0
-
+    zones = collections.Counter(r["zone"] for r in ok)
+    baseline_zones = {r["zone"] for r in ok if r["phase"] == "baseline"} - {"unknown"}
+    # A single baseline node cannot demonstrate a two-zone failover.
+    valid_baseline = failed_zone in baseline_zones and len(baseline_zones) >= 2
+    observed_failover = tracker.t_failover_completed is not None and valid_baseline
     summary = {
         "benchmark_metadata": {
-            "course": "IT457 Cloud Computing",
-            "project": "CoWIN Two-Zone High Availability PoC",
-            "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "target_url": target_url,
-            "duration_seconds": total_seconds,
-            "request_rate_rps": req_per_sec
+            "schema_version": 2, "environment": environment,
+            "started_at_utc": datetime.fromtimestamp(start_epoch, timezone.utc).isoformat(),
+            "target_url": target_url, "requested_duration_seconds": total_seconds,
+            "actual_duration_seconds": round(elapsed, 3), "request_rate_rps": req_per_sec,
+            "achieved_rps": round(len(records) / elapsed, 3),
+            "sampler": "sequential; target rate is an upper bound",
+            "failure_mode": "health-degradation" if trigger_failure else "operator-recorded",
+            "failed_zone": failed_zone, "convergence_window": tracker.CONVERGENCE_WINDOW,
         },
-        "throughput_metrics": {
-            "total_requests": total_reqs,
-            "successful_requests": len(successful_reqs),
-            "failed_requests": len(failed_reqs),
-            "success_rate_percent": round((len(successful_reqs) / total_reqs) * 100, 2),
-            "error_rate_percent": round((len(failed_reqs) / total_reqs) * 100, 2)
-        },
-        "latency_percentiles_ms": {
-            "min": round(min(latencies), 2) if latencies else 0,
-            "mean": round(sum(latencies) / len(latencies), 2) if latencies else 0,
-            "p50": percentile(latencies, 50),
-            "p90": percentile(latencies, 90),
-            "p95": percentile(latencies, 95),
-            "p99": percentile(latencies, 99),
-            "max": round(max(latencies), 2) if latencies else 0
-        },
-        "traffic_distribution": {
-            "zone_a_ap_south_1a_requests": zone_a_count,
-            "zone_b_ap_south_1b_requests": zone_b_count,
-            "zone_a_share_percent": round((zone_a_count / len(successful_reqs)) * 100, 1) if successful_reqs else 0,
-            "zone_b_share_percent": round((zone_b_count / len(successful_reqs)) * 100, 1) if successful_reqs else 0
-        },
+        "throughput_metrics": {"total_requests": len(records),
+            "successful_requests": len(ok), "failed_requests": len(records) - len(ok),
+            "success_rate_percent": round(100 * len(ok) / len(records), 3) if records else None},
+        "latency_percentiles_ms": {**{f"p{p}": percentile(latencies, p) for p in (50, 90, 95, 99)},
+            "min": min(latencies, default=None), "max": max(latencies, default=None),
+            "mean": round(sum(latencies) / len(latencies), 3) if latencies else None},
+        "traffic_distribution": dict(zones),
         "availability_and_failover": {
-            "failure_injected_at_second": 10.0,
-            "failover_achieved": tracker.t_failover_completed is not None,
-            "failover_time_seconds": failover_time,
-            "disruption_window_seconds": disruption_window,
-            "failed_requests_during_experiment": len(failed_reqs),
-            "recovery_time_objective_rto_seconds": failover_time,
-            "recovery_point_objective_rpo": "0 seconds (Read/Lookup Service Stateless)",
+            "two_zone_baseline_observed": valid_baseline,
+            "failover_achieved": observed_failover,
+            "failover_time_seconds": tracker.failover_time_seconds() if observed_failover else None,
+            "disruption_window_seconds": tracker.disruption_window_seconds(),
+            "stable_service_resumption_seconds": tracker.resumption_seconds(),
+            "recovery_observed": tracker.t_rebalanced is not None,
             "survivor_zone": tracker.survivor_zone,
-            "post_failover_availability_percent": post_failover_availability
-        }
+            "rpo": "not measured; this read-only test does not validate database replication",
+            "measurement_note": "Survivor streak is a client estimate, not ALB health detection or guaranteed RTO. Disruption span is first-to-last failed sample, which can be zero for one error. Stable resumption measures first error to a successful survivor streak. Absence of samples cannot prove availability."
+        },
+        "events": events, "injection_errors": injection_errors,
+        "limitations": ["No AWS health snapshots or video collected by this client.",
+                         "Local simulation changes health only; it does not stop an EC2 instance.",
+                         "Sequential sampling can miss short disruptions and cannot guarantee offered load."]
     }
-
-    # =========================================================================
-    # DISPLAY FORMATTED REPORT IN TERMINAL
-    # =========================================================================
-    print("\n" + "=" * 75)
-    print("                      EXPERIMENTAL RESULTS SUMMARY")
-    print("=" * 75)
-    print(f"Total Requests Processed : {total_reqs}")
-    print(f"Successful (HTTP 200)    : {len(successful_reqs)} ({summary['throughput_metrics']['success_rate_percent']}%)")
-    print(f"Failed / Interrupted     : {len(failed_reqs)} ({summary['throughput_metrics']['error_rate_percent']}%)")
-    print("-" * 75)
-    print("LATENCY DISTRIBUTION (Overall):")
-    print(f"  • Min Latency          : {summary['latency_percentiles_ms']['min']:6.2f} ms")
-    print(f"  • Average (Mean)       : {summary['latency_percentiles_ms']['mean']:6.2f} ms")
-    print(f"  • Median (p50)         : {summary['latency_percentiles_ms']['p50']:6.2f} ms")
-    print(f"  • 95th Percentile (p95): {summary['latency_percentiles_ms']['p95']:6.2f} ms")
-    print(f"  • 99th Percentile (p99): {summary['latency_percentiles_ms']['p99']:6.2f} ms")
-    print(f"  • Max Latency          : {summary['latency_percentiles_ms']['max']:6.2f} ms")
-    print("-" * 75)
-    print("TRAFFIC DISTRIBUTION BY AVAILABILITY ZONE:")
-    print(f"  • Zone A (ap-south-1a) : {zone_a_count:3d} requests ({summary['traffic_distribution']['zone_a_share_percent']}%)")
-    print(f"  • Zone B (ap-south-1b) : {zone_b_count:3d} requests ({summary['traffic_distribution']['zone_b_share_percent']}%)")
-    print("-" * 75)
-    print("FAILOVER & DISASTER RECOVERY METRICS:")
-    print(f"  • Failover Achieved          : {tracker.t_failover_completed is not None}")
-    if failover_time is not None:
-        print(f"  • Failover Time (detect+reroute): {failover_time:.2f} seconds")
-    print(f"  • Disruption Window (errors) : {disruption_window:.2f} seconds ({len(failed_reqs)} failed requests)")
-    print(f"  • Measured RTO               : {failover_time:.2f} seconds" if failover_time is not None else "  • Measured RTO               : n/a (failover not observed)")
-    print(f"  • Measured RPO               : 0 seconds (Stateless read architecture)")
-    if tracker.survivor_zone:
-        print(f"  • Survivor Zone Continuity   : 100% requests absorbed by {tracker.survivor_zone} during failure")
-    print("=" * 75)
-
-    # Save output artifacts
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    json_path = os.path.join(out_dir, "benchmark_results.json")
-    csv_path = os.path.join(out_dir, "benchmark_requests.csv")
-
-    with open(json_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"📁 JSON Summary saved to : {json_path}")
-
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=records[0].keys())
-        writer.writeheader()
-        writer.writerows(records)
-    print(f"📁 Detailed CSV saved to : {csv_path}\n")
-
+    paths[1].write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
     return summary
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CoWIN Failover Benchmark")
-    parser.add_argument("--url", type=str, default="http://localhost:8080", help="ALB Target URL")
-    parser.add_argument("--duration", type=int, default=32, help="Test duration in seconds")
-    parser.add_argument("--rps", type=int, default=10, help="Requests per second")
-    parser.add_argument("--no-auto-fail", action="store_true", help="Do not trigger auto-failure (for live manual tests)")
-    parser.add_argument("--fail-url", type=str, default="http://127.0.0.1:8081/simulate/fail",
-                        help="Direct URL used to degrade the Zone A target's health checks")
-    parser.add_argument("--recover-url", type=str, default="http://127.0.0.1:8081/simulate/recover",
-                        help="Direct URL used to restore the Zone A target's health checks")
+def main():
+    parser = argparse.ArgumentParser(description="Timestamped CoWIN failover sampler")
+    parser.add_argument("--url", default="http://localhost:8080")
+    parser.add_argument("--duration", type=float, default=32)
+    parser.add_argument("--rps", type=float, default=10)
+    parser.add_argument("--timeout", type=float, default=1.5)
+    parser.add_argument("--environment", choices=["local-simulator", "aws"], default="local-simulator")
+    parser.add_argument("--no-auto-fail", action="store_true")
+    parser.add_argument("--events-file", help="JSONL operator event log for manual runs")
+    parser.add_argument("--output-dir", help="New run directory; existing results are never overwritten")
+    parser.add_argument("--failed-zone", default="ap-south-1a")
+    parser.add_argument("--fail-at", type=float, default=10)
+    parser.add_argument("--recover-at", type=float, default=22)
+    parser.add_argument("--fail-url", default="http://127.0.0.1:8081/simulate/fail")
+    parser.add_argument("--recover-url", default="http://127.0.0.1:8081/simulate/recover")
     args = parser.parse_args()
+    try:
+        result = run_benchmark(args.url, args.duration, args.rps, not args.no_auto_fail,
+            args.fail_url, args.recover_url, args.output_dir, args.environment,
+            args.events_file, args.failed_zone, args.timeout, args.fail_at, args.recover_at)
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
+    if result["injection_errors"]:
+        return 2
+    if result["events"] and not result["availability_and_failover"]["failover_achieved"]:
+        return 3
+    return 0
 
-    run_benchmark(
-        target_url=args.url.rstrip("/"),
-        total_seconds=args.duration,
-        req_per_sec=args.rps,
-        trigger_failure=not args.no_auto_fail,
-        fail_url=args.fail_url,
-        recover_url=args.recover_url
-    )
+
+if __name__ == "__main__":
+    sys.exit(main())
