@@ -13,15 +13,28 @@ Hardened service shape (behavior-compatible with the original PoC service):
   dropped connections; a malformed pincode filter is a JSON 400
 - Threaded HTTP server so ALB health probes and client traffic do not
   queue behind each other; mutable runtime state is guarded by a lock
+
+Production-readiness additions (still zero external dependencies):
+- SQLite-backed center store (stdlib sqlite3): the JSON dataset is loaded
+  into a real database on first start and /api/v1/centers is served from
+  it, byte-compatible with the original file-backed responses
+- API-key authentication for the mutating /simulate/* endpoints via the
+  X-API-Key header (COWIN_API_KEY; unset = dev mode with a startup warning)
+- Per-client-IP token-bucket rate limiting (RATE_LIMIT_RPS /
+  RATE_LIMIT_BURST; 0 disables) with JSON 429s; /health and /metrics exempt
+- /metrics endpoint: uptime, zone health state, request/response counters,
+  store info, and auth/rate-limit counters for monitoring
 """
 
 import argparse
+import hmac
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import json
 import logging
 import os
 import signal
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -32,6 +45,18 @@ logger = logging.getLogger("cowin-lookup")
 DEFAULT_PORT = 8080
 DEFAULT_ZONE = "ap-south-1a"
 SERVICE_VERSION = "CoWIN-LookupService/1.0"
+
+# Mutating endpoints gated behind the X-API-Key header when COWIN_API_KEY
+# is configured. Read endpoints (health, lookup, info, metrics) stay open.
+AUTH_HEADER = "X-API-Key"
+PROTECTED_PATHS = frozenset({"/simulate/fail", "/simulate/recover"})
+
+# Paths exempt from rate limiting: ALB health probes and metrics scrapers
+# must never be throttled, or failover detection would break.
+RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/metrics"})
+
+# Longest accepted district filter; longer values are rejected as 400.
+MAX_DISTRICT_FILTER_LENGTH = 100
 
 # Sample record served if the centers dataset cannot be loaded.
 FALLBACK_CENTERS = [
@@ -50,15 +75,23 @@ class ServiceConfig:
     """Static configuration resolved from environment variables and CLI args."""
 
     def __init__(self, host="0.0.0.0", port=DEFAULT_PORT, zone=DEFAULT_ZONE,
-                 instance_id=None, data_file=None):
+                 instance_id=None, data_file=None, db_file=None, api_key=None,
+                 rate_limit_rps=0.0, rate_limit_burst=None):
         self.host = host
         self.port = port
         self.zone = zone
         self.instance_id = instance_id or f"i-{socket.gethostname()[:8]}"
+        self.api_key = api_key
+        self.rate_limit_rps = float(rate_limit_rps or 0.0)
+        self.rate_limit_burst = (float(rate_limit_burst) if rate_limit_burst
+                                 else None)
         if data_file is None:
             data_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "centers_data.json")
         self.data_file = data_file
+        if db_file is None:
+            db_file = os.path.splitext(data_file)[0] + ".db"
+        self.db_file = db_file
 
     @classmethod
     def from_env(cls):
@@ -69,6 +102,11 @@ class ServiceConfig:
             zone=os.environ.get("AWS_AZ", DEFAULT_ZONE),
             instance_id=os.environ.get("AWS_INSTANCE_ID"),
             data_file=os.environ.get("CENTERS_DATA_FILE"),
+            db_file=os.environ.get("CENTERS_DB_FILE"),
+            api_key=os.environ.get("COWIN_API_KEY"),
+            rate_limit_rps=float(os.environ.get("RATE_LIMIT_RPS", 0.0)),
+            rate_limit_burst=(float(os.environ["RATE_LIMIT_BURST"])
+                              if os.environ.get("RATE_LIMIT_BURST") else None),
         )
 
 
@@ -81,10 +119,35 @@ class ServiceState:
         self.request_count = 0
         self.force_unhealthy = False
 
+        self.auth_failures = 0
+        self.requests_by_endpoint = {}
+        self.responses_by_status = {}
+
     def record_request(self):
         with self._lock:
             self.request_count += 1
             return self.request_count
+
+    def record_auth_failure(self):
+        with self._lock:
+            self.auth_failures += 1
+
+    def auth_failure_count(self):
+        with self._lock:
+            return self.auth_failures
+
+    def record_response(self, path, status_code):
+        with self._lock:
+            self.requests_by_endpoint[path] = \
+                self.requests_by_endpoint.get(path, 0) + 1
+            self.responses_by_status[status_code] = \
+                self.responses_by_status.get(status_code, 0) + 1
+
+    def response_snapshot(self):
+        """Consistent copies of the response counters, for /metrics."""
+        with self._lock:
+            return (dict(sorted(self.requests_by_endpoint.items())),
+                    dict(self.responses_by_status))
 
     def set_unhealthy(self, flag):
         with self._lock:
@@ -115,6 +178,157 @@ def load_centers(data_file):
         return FALLBACK_CENTERS
 
 
+def _escape_like(value):
+    """Escape LIKE wildcards so filters keep plain substring semantics."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+class CenterStore:
+    """SQLite-backed store for the centers dataset.
+
+    The JSON dataset is loaded into a real database the first time the
+    service starts; afterwards the database is the source of truth and is
+    only re-populated when it is empty. Lookups run as SQL queries and
+    return the same records, in dataset order, as the original
+    file-backed version.
+    """
+
+    backend = "sqlite"
+
+    def __init__(self, db_file, data_file):
+        self._db_file = db_file
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(db_file, check_same_thread=False)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS centers (
+                    center_id     INTEGER PRIMARY KEY,
+                    position      INTEGER NOT NULL,
+                    pincode       INTEGER,
+                    district_name TEXT,
+                    payload       TEXT NOT NULL
+                )
+                """
+            )
+        if self.count() == 0:
+            self._load(data_file)
+
+    def _load(self, data_file):
+        centers = load_centers(data_file)
+        rows = [
+            (c.get("center_id"), position, c.get("pincode"),
+             c.get("district_name"), json.dumps(c))
+            for position, c in enumerate(centers)
+        ]
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO centers "
+                "(center_id, position, pincode, district_name, payload) "
+                "VALUES (?, ?, ?, ?, ?)", rows)
+        logger.info("Loaded %d centers into SQLite store %s",
+                    len(rows), self._db_file)
+
+    def count(self):
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM centers").fetchone()
+        return row[0]
+
+    def query(self, pincode=None, district=None):
+        """Filtered lookup; district is a case-insensitive substring match."""
+        sql = "SELECT payload FROM centers"
+        clauses, params = [], []
+        if pincode is not None:
+            clauses.append("pincode = ?")
+            params.append(pincode)
+        if district is not None:
+            clauses.append("LOWER(district_name) LIKE ? ESCAPE '\\'")
+            params.append("%" + _escape_like(district) + "%")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY position"
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except OverflowError:
+                # A pincode outside the SQLite integer range can match
+                # nothing; keep the empty-200 behavior of the list filter.
+                return []
+        return [json.loads(row[0]) for row in rows]
+
+    def close(self):
+        with self._lock:
+            self._conn.close()
+
+
+class InMemoryCenterStore:
+    """Fallback used when the SQLite database cannot be opened (for example
+    a read-only deployment directory). Same interface, previous behavior."""
+
+    backend = "memory"
+
+    def __init__(self, data_file):
+        self._centers = load_centers(data_file)
+
+    def count(self):
+        return len(self._centers)
+
+    def query(self, pincode=None, district=None):
+        results = self._centers
+        if pincode is not None:
+            results = [c for c in results if c.get("pincode") == pincode]
+        if district is not None:
+            results = [c for c in results
+                       if district in c.get("district_name", "").lower()]
+        return results
+
+    def close(self):
+        pass
+
+
+class RateLimiter:
+    """Simple per-client-IP token bucket (stdlib only).
+
+    Disabled when the configured rate is 0, which is also the default so
+    local demos and the 10 req/s failover benchmark are never throttled.
+    /health and /metrics are exempted at the routing layer so ALB probes
+    and metric scrapers are never limited.
+    """
+
+    def __init__(self, requests_per_second=0.0, burst=None):
+        self.rps = float(requests_per_second or 0.0)
+        self.burst = float(burst) if burst else max(1.0, self.rps * 2)
+        self.enabled = self.rps > 0
+        self._buckets = {}  # client IP -> (tokens, last refill time)
+        self._lock = threading.Lock()
+        self.rejected_total = 0
+
+    def allow(self, client_ip):
+        if not self.enabled:
+            return True
+        now = time.monotonic()
+        with self._lock:
+            tokens, last = self._buckets.get(client_ip, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - last) * self.rps)
+            if tokens >= 1.0:
+                self._buckets[client_ip] = (tokens - 1.0, now)
+                return True
+            self._buckets[client_ip] = (tokens, now)
+            self.rejected_total += 1
+            return False
+
+
+def build_store(config):
+    """Create the center store, preferring SQLite with an in-memory fallback."""
+    try:
+        return CenterStore(config.db_file, config.data_file)
+    except Exception as e:
+        logger.warning("Could not initialize SQLite store at %s (%s); "
+                       "falling back to the in-memory dataset",
+                       config.db_file, e)
+        return InMemoryCenterStore(config.data_file)
+
+
 class CoWINLookupHandler(BaseHTTPRequestHandler):
     server_version = SERVICE_VERSION
 
@@ -127,20 +341,25 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         return self.server.state
 
     @property
-    def centers(self):
-        return self.server.centers
+    def store(self):
+        return self.server.store
 
-    def _set_headers(self, status_code=200, content_type="application/json"):
+    def _set_headers(self, status_code=200, content_type="application/json",
+                     extra_headers=None):
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("X-Served-By-Zone", self.config.zone)
         self.send_header("X-Instance-Id", self.config.instance_id)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        if extra_headers:
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
         self.end_headers()
 
-    def _write_json(self, body, status_code=200):
-        self._set_headers(status_code)
+    def _write_json(self, body, status_code=200, extra_headers=None):
+        self.state.record_response(urlparse(self.path).path, status_code)
+        self._set_headers(status_code, extra_headers=extra_headers)
         self.wfile.write(json.dumps(body, indent=2).encode("utf-8"))
 
     def do_OPTIONS(self):
@@ -174,6 +393,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         zone = self.config.zone
         instance_id = self.config.instance_id
 
+        if not self._check_rate_limit(path):
+            return
+
         # Health Check Endpoint (used by AWS ALB Target Group)
         if path == "/health":
             if self.state.is_unhealthy():
@@ -196,6 +418,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         # Administrative controls to test target health transitions (supports GET and POST)
+        if path in PROTECTED_PATHS and not self._check_auth():
+            return
+
         if path == "/simulate/fail":
             self._simulate_fail()
             return
@@ -206,7 +431,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
 
         # Centers Lookup Endpoint
         if path in ("/api/v1/centers", "/centers"):
-            results = self.centers
+            req_pincode = None
+            req_district = None
 
             # Optional filter by pincode
             if "pincode" in query:
@@ -219,12 +445,20 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                                    f"'{query['pincode'][0]}'"
                     }, status_code=400)
                     return
-                results = [c for c in results if c.get("pincode") == req_pincode]
 
             # Optional filter by district
             if "district" in query:
                 req_district = query["district"][0].lower()
-                results = [c for c in results if req_district in c.get("district_name", "").lower()]
+                if len(req_district) > MAX_DISTRICT_FILTER_LENGTH:
+                    self._write_json({
+                        "error": "Bad Request",
+                        "message": "district filter is too long "
+                                   f"(max {MAX_DISTRICT_FILTER_LENGTH} characters)"
+                    }, status_code=400)
+                    return
+
+            results = self.store.query(pincode=req_pincode,
+                                       district=req_district)
 
             self._write_json({
                 "service": "CoWIN Vaccination Center Lookup",
@@ -235,6 +469,11 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                 "count": len(results),
                 "centers": results
             })
+            return
+
+        # Metrics Endpoint - operational counters for monitoring
+        if path == "/metrics":
+            self._metrics()
             return
 
         # Root Endpoint - Instance Info & Diagnostics
@@ -256,7 +495,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                     "health_check": "/health",
                     "lookup_centers": "/api/v1/centers",
                     "lookup_by_pincode": "/api/v1/centers?pincode=380009",
-                    "lookup_by_district": "/api/v1/centers?district=Ahmedabad"
+                    "lookup_by_district": "/api/v1/centers?district=Ahmedabad",
+                    "metrics": "/metrics"
                 }
             })
             return
@@ -265,7 +505,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self._write_json({
             "error": "Not Found",
             "path": path,
-            "message": "Valid endpoints are /health, /api/v1/centers, and /"
+            "message": "Valid endpoints are /health, /api/v1/centers, /metrics, and /"
         }, status_code=404)
 
     def do_POST(self):
@@ -287,7 +527,13 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
+        if not self._check_rate_limit(path):
+            return
+
         # Administrative controls to test target health transitions
+        if path in PROTECTED_PATHS and not self._check_auth():
+            return
+
         if path == "/simulate/fail":
             self._simulate_fail()
             return
@@ -297,6 +543,84 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         self._write_json({"error": "Unknown POST action"}, status_code=404)
+
+    def _method_not_allowed(self):
+        """JSON 405 for unsupported methods instead of the default HTML 501."""
+        self._write_json({
+            "error": "Method Not Allowed",
+            "message": "This service supports GET, POST and OPTIONS only"
+        }, status_code=405, extra_headers={"Allow": "GET, POST, OPTIONS"})
+
+    do_PUT = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_PATCH = _method_not_allowed
+
+    def _check_rate_limit(self, path):
+        """Return True when the request may proceed under the rate limit;
+        otherwise write the JSON 429 and return False."""
+        if path in RATE_LIMIT_EXEMPT_PATHS:
+            return True
+        if self.server.rate_limiter.allow(self.client_address[0]):
+            return True
+        logger.warning("Rate limited %s %s from %s",
+                       self.command, path, self.client_address[0])
+        self._write_json({
+            "error": "Too Many Requests",
+            "message": "Rate limit exceeded - slow down and retry"
+        }, status_code=429, extra_headers={"Retry-After": "1"})
+        return False
+
+    def _check_auth(self):
+        """Gate mutating endpoints behind the configured API key.
+
+        Returns True when the request may proceed; otherwise writes the
+        JSON 401 and returns False. With no COWIN_API_KEY configured the
+        service runs in dev mode and every request is allowed (a warning
+        is logged at startup).
+        """
+        if self.config.api_key is None:
+            return True
+        supplied = self.headers.get(AUTH_HEADER, "")
+        if hmac.compare_digest(supplied, self.config.api_key):
+            return True
+        self.state.record_auth_failure()
+        logger.warning("Rejected %s %s from %s: missing or invalid API key",
+                       self.command, self.path, self.client_address[0])
+        self._write_json({
+            "error": "Unauthorized",
+            "message": f"A valid {AUTH_HEADER} header is required for this endpoint"
+        }, status_code=401)
+        return False
+
+    def _metrics(self):
+        """Operational counters snapshot for monitoring and the demo."""
+        by_endpoint, by_status = self.state.response_snapshot()
+        limiter = self.server.rate_limiter
+        self._write_json({
+            "service": "CoWIN Vaccination Center Lookup",
+            "zone": self.config.zone,
+            "instance_id": self.config.instance_id,
+            "status": "unhealthy" if self.state.is_unhealthy() else "healthy",
+            "uptime_seconds": self.state.uptime(),
+            "total_requests_served": self.state.total_requests(),
+            "requests_by_endpoint": by_endpoint,
+            "responses_by_status": {str(code): count for code, count in
+                                    sorted(by_status.items())},
+            "store": {
+                "backend": self.store.backend,
+                "centers_loaded": self.store.count(),
+            },
+            "auth": {
+                "enabled": self.config.api_key is not None,
+                "failed_attempts": self.state.auth_failure_count(),
+            },
+            "rate_limit": {
+                "enabled": limiter.enabled,
+                "requests_per_second": limiter.rps,
+                "burst": limiter.burst,
+                "rejected_requests": limiter.rejected_total,
+            },
+        })
 
     def _simulate_fail(self):
         self.state.set_unhealthy(True)
@@ -328,8 +652,14 @@ class CoWINHTTPServer(ThreadingHTTPServer):
     def __init__(self, config):
         self.config = config
         self.state = ServiceState()
-        self.centers = load_centers(config.data_file)
+        self.store = build_store(config)
+        self.rate_limiter = RateLimiter(config.rate_limit_rps,
+                                        config.rate_limit_burst)
         super().__init__((config.host, config.port), CoWINLookupHandler)
+
+    def server_close(self):
+        super().server_close()
+        self.store.close()
 
 
 def create_server(config):
@@ -368,6 +698,10 @@ def serve(config, log_level="INFO"):
     logger.info("  Availability Zone : %s", config.zone)
     logger.info("  Instance ID       : %s", config.instance_id)
     logger.info("  Health Endpoint   : http://%s:%d/health", config.host, config.port)
+    if config.api_key is None:
+        logger.warning("COWIN_API_KEY is not set - /simulate/* endpoints are "
+                       "UNAUTHENTICATED (dev mode; set COWIN_API_KEY to require "
+                       "an API key)")
     try:
         httpd.serve_forever()
     finally:
@@ -376,10 +710,12 @@ def serve(config, log_level="INFO"):
 
 
 def run(port=DEFAULT_PORT, zone=DEFAULT_ZONE, instance_id=None,
-        host="0.0.0.0", log_level=None, data_file=None):
+        host="0.0.0.0", log_level=None, data_file=None, db_file=None,
+        api_key=None):
     """Backward-compatible programmatic entry point."""
     config = ServiceConfig(host=host, port=port, zone=zone,
-                           instance_id=instance_id, data_file=data_file)
+                           instance_id=instance_id, data_file=data_file,
+                           db_file=db_file, api_key=api_key)
     serve(config, log_level or os.environ.get("LOG_LEVEL", "INFO"))
 
 
@@ -395,10 +731,25 @@ if __name__ == "__main__":
                         help="Custom instance identifier (env: AWS_INSTANCE_ID)")
     parser.add_argument("--data-file", type=str, default=os.environ.get("CENTERS_DATA_FILE", None),
                         help="Path to centers dataset JSON (env: CENTERS_DATA_FILE)")
+    parser.add_argument("--db-file", type=str, default=os.environ.get("CENTERS_DB_FILE", None),
+                        help="Path to the centers SQLite database (env: CENTERS_DB_FILE)")
+    parser.add_argument("--api-key", type=str, default=os.environ.get("COWIN_API_KEY", None),
+                        help="API key required on mutating endpoints (env: COWIN_API_KEY)")
+    parser.add_argument("--rate-limit-rps", type=float,
+                        default=float(os.environ.get("RATE_LIMIT_RPS", 0.0)),
+                        help="Sustained requests/second allowed per client IP; "
+                             "0 disables limiting (env: RATE_LIMIT_RPS)")
+    parser.add_argument("--rate-limit-burst", type=float,
+                        default=(float(os.environ["RATE_LIMIT_BURST"])
+                                 if os.environ.get("RATE_LIMIT_BURST") else None),
+                        help="Token bucket size per client IP (env: RATE_LIMIT_BURST)")
     parser.add_argument("--log-level", type=str, default=os.environ.get("LOG_LEVEL", "INFO"),
                         help="Logging level (env: LOG_LEVEL)")
     args = parser.parse_args()
 
     config = ServiceConfig(host=args.host, port=args.port, zone=args.zone,
-                           instance_id=args.instance_id, data_file=args.data_file)
+                           instance_id=args.instance_id, data_file=args.data_file,
+                           db_file=args.db_file, api_key=args.api_key,
+                           rate_limit_rps=args.rate_limit_rps,
+                           rate_limit_burst=args.rate_limit_burst)
     serve(config, args.log_level)

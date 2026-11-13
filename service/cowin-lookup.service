@@ -1,17 +1,14 @@
 [Unit]
-Description=CoWIN Vaccination Center Lookup Microservice
+Description=CoWIN Lookup Microservice
 After=network.target
 
 [Service]
 Type=simple
-User=ec2-user
 WorkingDirectory=/opt/cowin
-ExecStart=/usr/bin/python3 /opt/cowin/app.py --port 8080
+EnvironmentFile=-/etc/default/cowin-lookup
+ExecStart=/usr/bin/python3 /opt/cowin/app.py
 Restart=always
 RestartSec=3
-Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/etc/default/cowin-lookup
 
 [Install]
 WantedBy=multi-user.target
-

@@ -14,6 +14,14 @@ the failover-time vs disruption-window split, the graceful-eviction case
 (zero failed requests but failover achieved) and re-balancing after
 recovery.
 
+`service/tests/test_production_readiness.py` covers the
+production-readiness features: the SQLite store (loading, filters,
+ordering, persistence, fallback) and byte-compatibility of the HTTP
+responses with the file-backed version, API-key auth on `/simulate/*`
+(401s, dev mode), token-bucket rate limiting (429s, health/metrics
+exemptions), the `/metrics` endpoint and its counters, and the tightened
+input validation.
+
 ## Running the tests
 
 From the repository root:
