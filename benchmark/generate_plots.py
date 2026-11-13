@@ -1,74 +1,70 @@
 #!/usr/bin/env python3
-"""
-Visualize benchmark data from benchmark_requests.csv:
-Generates an ASCII chart and timeline of the failover event,
-zone distribution, and latency profile.
-"""
-
+"""Render portable SVG evidence from one run's CSV and JSON; no fixed event times."""
+import argparse
 import csv
+import html
 import json
-import os
-import sys
+from pathlib import Path
 
-DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(DIR, "benchmark_requests.csv")
-JSON_FILE = os.path.join(DIR, "benchmark_results.json")
 
-if not os.path.exists(CSV_FILE) or not os.path.exists(JSON_FILE):
-    print("Benchmark results files not found. Run failover_benchmark.py first.")
-    sys.exit(1)
+def render(run_dir):
+    run_dir = Path(run_dir)
+    summary = json.loads((run_dir / 'benchmark_results.json').read_text())
+    with (run_dir / 'benchmark_requests.csv').open() as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError('no request samples to plot')
+    width, height, left, right = 1100, 650, 80, 1040
+    x_max = max(float(r['elapsed_s']) for r in rows) or 1
+    y_max = max(float(r['latency_ms']) for r in rows) * 1.15 or 1
+    x = lambda v: left + float(v) / x_max * (right - left)
+    y = lambda v: 400 - float(v) / y_max * 260
+    esc = lambda v: html.escape(str(v), quote=True)
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+             '<rect width="100%" height="100%" fill="#ffffff"/>',
+             '<style>text{font-family:Arial,sans-serif;fill:#172b4d;font-size:14px}.muted{fill:#52647a;font-size:12px}</style>',
+             '<text x="80" y="32" font-size="23">CoWIN latency and routing evidence</text>']
+    meta = summary['benchmark_metadata']
+    parts += [f'<text x="80" y="60">Environment: {esc(meta.get("environment", "unlabelled legacy run"))} | {esc(meta.get("started_at_utc", meta.get("date", "")))}</text>',
+              '<text x="80" y="84" class="muted">Client samples only. Simulator results are not AWS results; event markers are observations, not health-check proof.</text>']
+    for i in range(6):
+        yy = 400 - i * 52
+        parts += [f'<line x1="80" y1="{yy}" x2="1040" y2="{yy}" stroke="#e1e7ef"/>',
+                  f'<text x="8" y="{yy+5}" class="muted">{y_max*i/5:.2f} ms</text>']
+        xx = x(x_max * i / 5)
+        parts.append(f'<text x="{xx-12:.1f}" y="425" class="muted">{x_max*i/5:.1f}s</text>')
+    points = ' '.join(f'{x(r["elapsed_s"]):.2f},{y(r["latency_ms"]):.2f}' for r in rows)
+    parts.append(f'<polyline points="{points}" fill="none" stroke="#2368c4" stroke-width="1.5"/>')
+    zones = sorted({r['zone'] for r in rows})
+    colors = ['#2368c4', '#16805d', '#8054af', '#967326']
+    for row in rows:
+        xx = x(row['elapsed_s'])
+        good = row['success'] == 'True'
+        color = colors[zones.index(row['zone']) % len(colors)] if good else '#bf243a'
+        parts.append(f'<circle cx="{xx:.2f}" cy="{y(row["latency_ms"]):.2f}" r="2" fill="{color}"/>')
+        lane = 460 + 22 * zones.index(row['zone'])
+        parts.append(f'<circle cx="{xx:.2f}" cy="{lane}" r="2.5" fill="{color}"/>')
+    for i, zone in enumerate(zones):
+        parts.append(f'<text x="8" y="{464+22*i}" class="muted">{esc(zone)}</text>')
+    for i, event in enumerate(summary.get('events', [])):
+        xx = x(event['elapsed_s'])
+        parts.append(f'<line x1="{xx:.2f}" y1="135" x2="{xx:.2f}" y2="400" stroke="#ba4b16" stroke-dasharray="4 4"/>')
+        # Labels use a separate legend so nearby events cannot overlap the plot.
+        parts.append(f'<text x="{xx:.2f}" y="125" class="muted">{i+1}</text>')
+        col, line = i % 2, i // 2
+        parts.append(f'<text x="{80+col*480}" y="{550+line*19}" class="muted">{i+1}. {esc(event["event"])} at {event["elapsed_s"]:.3f}s</text>')
+    parts += ['<text x="80" y="630" class="muted">Blue/green/purple: zone samples. Red: failed lookup. Raw timestamps and status codes remain in the CSV.</text>', '</svg>']
+    path = run_dir / 'latency_timeline.svg'
+    path.write_text('\n'.join(parts) + '\n')
+    return path
 
-with open(JSON_FILE) as f:
-    summary = json.load(f)
 
-rows = []
-with open(CSV_FILE) as f:
-    reader = csv.DictReader(f)
-    for r in reader:
-        rows.append(r)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--run-dir', default=str(Path(__file__).parent))
+    args = parser.parse_args()
+    print(render(args.run_dir))
 
-print("\n" + "=" * 78)
-print("       COWIN HIGH AVAILABILITY: VISUAL FAILOVER & TRAFFIC TIMELINE")
-print("=" * 78)
 
-# Group into 1-second buckets
-buckets = {}
-for r in rows:
-    sec = int(float(r["elapsed_s"]))
-    if sec not in buckets:
-        buckets[sec] = {"zone_a": 0, "zone_b": 0, "errors": 0, "latencies": []}
-    if r["success"] == "True":
-        if "1a" in r["zone"]:
-            buckets[sec]["zone_a"] += 1
-        elif "1b" in r["zone"]:
-            buckets[sec]["zone_b"] += 1
-    else:
-        buckets[sec]["errors"] += 1
-    buckets[sec]["latencies"].append(float(r["latency_ms"]))
-
-print("Time(s) | Traffic Route Visualizer                                    | Avg Latency")
-print("------- | ----------------------------------------------------------- | -----------")
-for sec in sorted(buckets.keys()):
-    b = buckets[sec]
-    bar_a = "🔵" * b["zone_a"]
-    bar_b = "🟢" * b["zone_b"]
-    bar_err = "🔴" * b["errors"]
-    avg_lat = sum(b["latencies"]) / len(b["latencies"]) if b["latencies"] else 0.0
-
-    note = ""
-    if sec == 10:
-        note = " ⚡ [Zone A Failure Injected]"
-    elif sec == 12:
-        note = " ⚠️ [ALB Detects & Evicts Zone A]"
-    elif sec == 22:
-        note = " 🔄 [Zone A Restored]"
-    elif sec == 24:
-        note = " 🎉 [ALB Re-admits Zone A]"
-
-    line = f"{sec:2d}s     | {bar_a}{bar_b}{bar_err:<12} {note:<32} | {avg_lat:5.1f} ms"
-    print(line)
-
-print("-" * 78)
-print("Legend: 🔵 = Zone A (ap-south-1a)  |  🟢 = Zone B (ap-south-1b)  |  🔴 = Error (HTTP 5xx)")
-print("=" * 78 + "\n")
-
+if __name__ == '__main__':
+    main()
