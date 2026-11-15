@@ -47,6 +47,42 @@ class EvidenceTests(unittest.TestCase):
         t.observe(False, 'unknown', 4)
         self.assertIsNone(t.resumption_seconds())
 
+    def test_recovery_traffic_preserves_measured_resumption(self):
+        t = FailoverTracker(failed_zone='a')
+        t.note_failure_injected(0)
+        t.observe(False, 'unknown', 1)
+        for n in range(5):
+            t.observe(True, 'b', 2 + n / 10)
+        self.assertEqual(t.resumption_seconds(), 1.4)
+        t.note_recovery_injected(3)
+        self.assertIn('rebalanced', t.observe(True, 'a', 4))
+        for n in range(8):
+            t.observe(True, 'a' if n % 2 else 'b', 5 + n / 10)
+        self.assertEqual(t.resumption_seconds(), 1.4)
+        # A real new disruption still invalidates stable service.
+        t.observe(False, 'unknown', 6)
+        self.assertIsNone(t.resumption_seconds())
+
+    def test_healthy_recovered_zone_can_complete_resumption_streak(self):
+        t = FailoverTracker(failed_zone='a')
+        t.note_failure_injected(0)
+        t.observe(False, 'unknown', 1)
+        t.observe(True, 'b', 2)
+        t.note_recovery_injected(3)
+        for n in range(4):
+            t.observe(True, 'a', 4 + n / 10)
+        self.assertEqual(t.resumption_seconds(), 3.3)
+        self.assertIsNone(t.failover_time_seconds())
+
+    def test_unknown_zone_after_recovery_is_not_healthy_evidence(self):
+        t = FailoverTracker(failed_zone='a')
+        t.note_failure_injected(0)
+        t.observe(False, 'unknown', 1)
+        t.note_recovery_injected(2)
+        for n in range(5):
+            t.observe(True, 'unknown', 3 + n / 10)
+        self.assertIsNone(t.resumption_seconds())
+
     def test_recovery_does_not_invent_failover(self):
         t = FailoverTracker(failed_zone='a')
         t.note_failure_injected(1)

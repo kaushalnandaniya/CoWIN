@@ -97,7 +97,10 @@ class FailoverTracker:
                 events.append("rebalanced")
 
         if self.t_first_disruption is not None:
-            survivor_ok = success and zone != "unknown" and zone != self.failed_zone
+            # After recovery, healthy traffic from either zone is valid. Do
+            # not erase an established resumption merely because ALB rebalances.
+            survivor_ok = (success and zone != "unknown" and
+                           (zone != self.failed_zone or self.t_recovery_injected is not None))
             self._success_streak = self._success_streak + 1 if survivor_ok else 0
             if not survivor_ok:
                 self.t_stable_resumption = None
@@ -124,6 +127,7 @@ class FailoverTracker:
 
 
     def resumption_seconds(self):
+        """First error to a healthy streak; restored zones count after recovery."""
         if self.t_first_disruption is None:
             return 0.0
         if self.t_stable_resumption is None:
@@ -363,7 +367,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
             "recovery_observed": tracker.t_rebalanced is not None,
             "survivor_zone": tracker.survivor_zone,
             "rpo": "not measured; this read-only test does not validate database replication",
-            "measurement_note": "Survivor streak is a client estimate, not ALB health detection or guaranteed RTO. Disruption span is first-to-last failed sample, which can be zero for one error. Stable resumption measures first error to a successful survivor streak. Absence of samples cannot prove availability."
+            "measurement_note": "Survivor streak is a client estimate, not ALB health detection or guaranteed RTO. Disruption span is first-to-last failed sample, which can be zero for one error. Stable resumption measures first error to a successful survivor streak (either healthy zone after recovery). Absence of samples cannot prove availability."
         },
         "events": events, "injection_errors": injection_errors,
         "limitations": ["No AWS health snapshots or video collected by this client.",
