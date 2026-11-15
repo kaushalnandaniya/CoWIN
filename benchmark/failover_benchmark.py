@@ -195,6 +195,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         if path.stat().st_size > 1024 * 1024:
             raise ValueError("events file exceeds 1 MiB")
         # A writer can be between write() calls: ignore an incomplete last line.
+        entries = []
         for line in path.read_text().splitlines(keepends=True):
             if not line.endswith("\n"):
                 continue
@@ -202,7 +203,52 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
             stamp = float(entry["timestamp"])
             if not math.isfinite(stamp) or stamp > time.time():
                 raise ValueError("invalid/future event timestamp")
+            entries.append((stamp, entry))
+        for stamp, entry in sorted(entries, key=lambda item: item[0]):
             note(entry["event"], stamp, "operator-event-file", entry.get("note", ""))
+
+    def reconcile_events():
+        """Replay completed samples when a timestamped marker arrives late.
+
+        Phases use response completion time, including requests that overlap
+        injection. A late marker can change earlier CSV rows and derived events;
+        replay keeps those artifacts consistent with the final summary.
+        """
+        nonlocal tracker
+        markers = sorted((event for event in events
+                          if event["source"] != "client-observation"),
+                         key=lambda event: event["timestamp"])
+        tracker = FailoverTracker(failed_zone=failed_zone)
+        events.clear()
+        pending = iter(markers)
+        marker = next(pending, None)
+
+        def apply_marker(event):
+            if event["event"] == "failure":
+                tracker.note_failure_injected(event["timestamp"])
+            else:
+                tracker.note_recovery_injected(event["timestamp"])
+            events.append(event)
+
+        for row in records:
+            while marker is not None and marker["timestamp"] <= row["timestamp"]:
+                apply_marker(marker)
+                marker = next(pending, None)
+            row["phase"] = ("recovery" if tracker.t_recovery_injected is not None else
+                            "failure" if tracker.t_failure_injected is not None else "baseline")
+            for event in tracker.observe(row["success"], row["zone"], row["timestamp"]):
+                events.append({"event": event, "timestamp": row["timestamp"],
+                               "elapsed_s": row["elapsed_s"],
+                               "source": "client-observation"})
+        while marker is not None:
+            apply_marker(marker)
+            marker = next(pending, None)
+        # Correct already-flushed rows instead of leaving stale baseline phases.
+        handle.seek(0)
+        handle.truncate()
+        writer.writeheader()
+        writer.writerows(records)
+        handle.flush()
 
     print(f"Environment: {environment}; target: {target_url}; output: {out}")
     fields = ["req_id", "timestamp", "timestamp_utc", "elapsed_s", "phase",
@@ -213,6 +259,7 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
         writer.writeheader()
         while time.monotonic() - start_clock < total_seconds:
             elapsed = time.monotonic() - start_clock
+            marker_count = sum(e["source"] != "client-observation" for e in events)
             if trigger_failure:
                 for kind, at, url in (("failure", fail_at, fail_url),
                                       ("recovery", recover_at, recover_url)):
@@ -228,6 +275,8 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
                         except Exception as exc:
                             injection_errors.append({"event": kind, "error": str(exc)})
             read_events()
+            if sum(e["source"] != "client-observation" for e in events) != marker_count:
+                reconcile_events()
             request_start = time.perf_counter()
             status, zone, instance, error = None, "unknown", "unknown", ""
             success = False
@@ -262,13 +311,23 @@ def run_benchmark(target_url, total_seconds=35, req_per_sec=10, trigger_failure=
                 round(stamp - start_epoch, 3), phase, status, success,
                 round(latency, 3), zone, instance, error]))
             records.append(row)
-            writer.writerow(row)
-            handle.flush()
+            marker_count = sum(e["source"] != "client-observation" for e in events)
+            read_events()
+            if sum(e["source"] != "client-observation" for e in events) != marker_count:
+                reconcile_events()
+            else:
+                writer.writerow(row)
+                handle.flush()
             # No catch-up bursts: this is a sequential sampler, not a stress generator.
             delay = min(1 / req_per_sec - (time.perf_counter() - request_start),
                         total_seconds - (time.monotonic() - start_clock))
             if delay > 0:
                 time.sleep(delay)
+        # Include markers appended during the final pacing sleep as well.
+        marker_count = sum(e["source"] != "client-observation" for e in events)
+        read_events()
+        if sum(e["source"] != "client-observation" for e in events) != marker_count:
+            reconcile_events()
     elapsed = time.monotonic() - start_clock
     ok = [r for r in records if r["success"]]
     latencies = [r["latency_ms"] for r in records]
