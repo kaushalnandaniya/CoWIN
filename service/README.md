@@ -77,3 +77,44 @@ security groups separately. The verifier never provisions or stops anything.
 Keep `/simulate/*` protected or restricted in a live deployment. Local health
 simulation and a real EC2 instance-stop are different experiments. See
 `benchmark/README.md` for the manual event workflow and measurement limits.
+
+## Lookup frontend
+
+The service also serves a small, dependency-free frontend at **`/ui/`**
+(`http://localhost:8080/ui/` when running locally). Start the service normally:
+
+```bash
+python3 service/app.py
+```
+
+The page requests the same origin's `/api/v1/centers`, with optional `district`
+and `pincode` query parameters. Both filters can be combined. It shows sample
+sessions, the serving zone and instance from that lookup response, and explicit
+loading, empty and retryable error states. Requests time out after 10 seconds.
+There is no background polling, external CDN, build step or JavaScript package.
+All dataset strings are inserted as text, not interpreted as HTML.
+
+This is a course demo, not the official CoWIN portal or a booking service.
+Dates and capacity values come directly from the static sample dataset and
+must not be presented as live availability. A successful lookup does not prove
+both zones are healthy or that a failover test passed. No failure controls or
+API keys are exposed by the frontend.
+
+### Deployment
+
+Copy the entire `service/static/` directory alongside `app.py` on **both**
+servers. With the supplied systemd layout this is `/opt/cowin/static/`.
+Restart the service after installing the updated `app.py`. Allow `/ui/` and its
+assets through the ALB listener to the same target group as the API. The public
+frontend URL is the ALB address followed by `/ui/`.
+
+The existing CloudFormation template embeds its own copies of `app.py` in
+UserData. It does not automatically pick up repository file changes: update
+both embedded copies and include all three static assets before using it for
+a fresh frontend deployment. This PR does not alter infrastructure or deploy
+the frontend to an existing stack.
+
+`/` and `/info` remain JSON for compatibility. Only the explicitly allowlisted
+`/ui`, `/ui/`, `/ui/index.html`, `/ui/styles.css` and `/ui/app.js` routes serve
+files. Other paths keep the API's JSON 404 response. Missing assets return a
+JSON 503, rather than exposing files outside that directory.
