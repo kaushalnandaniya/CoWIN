@@ -111,7 +111,7 @@
           <button id="btn-recover-b" class="secondary" type="button">Recover Zone B</button>
         </div>
         <p id="control-result" class="control-result" role="status"></p>
-        <p class="field-hint">Controls go straight to each zone's node: locally that is the node address itself; on the AWS deployment the ALB denies /simulate/* with 403, so run an SSH tunnel per node (ssh -L 8081:localhost:8080 &lt;zone A host&gt; and -L 8082:... for zone B) and point the endpoint fields above at the local forwards. The tunnel also keeps the API key off the public HTTP path. A simulated failure auto-recovers after about 2 minutes even if Recover is never pressed. Only one zone can be down at a time: while one zone is degraded, the other zone's Stop is refused with a 409.</p>
+        <p class="field-hint">Controls go straight to each zone's node. On the AWS deployment the ALB denies /simulate/* with 403, so open an SSH tunnel per node (ssh -L 8081:localhost:8080 &lt;zone A host&gt; and -L 8082:... for zone B) and load this page through the tunnel too (http://localhost:8081/admin/), with the endpoint fields pointed at the local forwards - the page and the API key then travel inside SSH, not public HTTP. A simulated failure auto-recovers after about 2 minutes even if Recover is never pressed, and pressing Stop again during a failure is refused (the window can't be extended). Only one zone can be down at a time: while one zone is degraded, the other zone's Stop is refused with a 409.</p>
         <h3 class="log-title">Event log</h3>
         <ul id="event-log" class="event-log"></ul>
       </aside>

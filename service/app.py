@@ -906,26 +906,36 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
 
     def _simulate_fail(self):
         if self.state.is_unhealthy():
-            # Already in simulated failure: idempotent re-arm of the
-            # auto-recover timer, no peer re-check (this node already
-            # holds the one allowed failure).
+            # Already in simulated failure. Refuse rather than re-arm:
+            # re-arming the auto-recover timer on every fail would let a
+            # key holder extend the degradation indefinitely. One accepted
+            # fail = one bounded window, ended by the timer or Recover.
+            logger.warning("Refused simulated failure: already active on "
+                           "this node (no timer re-arm)")
+            self._write_json({
+                "error": "Conflict",
+                "message": ("A simulated failure is already active on this "
+                            "node; it ends at the auto-recover deadline or "
+                            "via /simulate/recover."),
+                "zone": self.config.zone,
+                "status": "unhealthy"
+            }, status_code=409)
+            return
+        # Intent-first check-and-set, safe against simultaneous
+        # fail commands on both nodes: mark our own failure BEFORE
+        # consulting the peer. A peer whose health read observed us
+        # healthy finished that read before our mark, so its own
+        # read of us happens after our mark (program order) and
+        # must see us failing - it backs off with a 409. If we are
+        # the one who sees the peer failing, we roll back our
+        # intent and refuse. At most one node stays failed; in the
+        # worst interleaving both refuse and neither goes down.
+        with self.server.simulate_lock:
+            self.state.set_unhealthy(True)
+            if not self._peer_allows_failure():
+                self.state.set_unhealthy(False)  # lost the race: undo
+                return
             self._schedule_auto_recover()
-        else:
-            # Intent-first check-and-set, safe against simultaneous
-            # fail commands on both nodes: mark our own failure BEFORE
-            # consulting the peer. A peer whose health read observed us
-            # healthy finished that read before our mark, so its own
-            # read of us happens after our mark (program order) and
-            # must see us failing - it backs off with a 409. If we are
-            # the one who sees the peer failing, we roll back our
-            # intent and refuse. At most one node stays failed; in the
-            # worst interleaving both refuse and neither goes down.
-            with self.server.simulate_lock:
-                self.state.set_unhealthy(True)
-                if not self._peer_allows_failure():
-                    self.state.set_unhealthy(False)  # lost the race: undo
-                    return
-                self._schedule_auto_recover()
         logger.warning("Simulated failure ENABLED - /health now returns 500")
         self._write_json({
             "message": "Health check now returning 500",

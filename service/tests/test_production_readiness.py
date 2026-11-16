@@ -591,6 +591,28 @@ class TestSimulateAutoRecover(unittest.TestCase):
         finally:
             stop_test_server(httpd, thread)
 
+    def test_repeat_fail_does_not_rearm_the_timer(self):
+        # Hard bound: a fail while a simulated failure is already active
+        # is refused (409) and does NOT extend the window - otherwise a
+        # key holder could keep the zone degraded indefinitely.
+        httpd, thread, base = start_test_server(auto_recover_seconds=0.6)
+        try:
+            req = urllib.request.Request(base + "/simulate/fail", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            time.sleep(0.3)  # half the window passes
+            req = urllib.request.Request(base + "/simulate/fail", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 409)
+            # If the re-fail had re-armed the timer, recovery would come
+            # at ~0.9s; the original deadline (~0.6s) must win.
+            time.sleep(0.5)
+            with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            stop_test_server(httpd, thread)
+
     def test_manual_recover_cancels_pending_auto_recover(self):
         httpd, thread, base = start_test_server(auto_recover_seconds=30)
         try:

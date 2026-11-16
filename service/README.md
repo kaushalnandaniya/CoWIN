@@ -103,25 +103,56 @@ load balancer, draws the topology with each zone's current state and the
 serving path, and offers **Stop/Recover** buttons for both zones. The
 commands go straight to each zone's own endpoint
 (`/simulate/zone-<letter>/<action>`), so a drill can only reach the
-intended zone - locally that is the node address itself; on the real AWS
-deployment the ALB denies `/simulate/*` with 403, so the operator opens
-one SSH tunnel per node and points the page's endpoint fields at the
-local forwards:
+intended zone. On the real AWS deployment the ALB denies `/simulate/*`
+with 403, so the operator opens one SSH tunnel per node and loads the
+panel ITSELF through a tunnel - the page code must not come over the
+public HTTP path either:
 
 ```bash
 ssh -L 8081:localhost:8080 ec2-user@<zone A public IP>
 ssh -L 8082:localhost:8080 ec2-user@<zone B public IP>
+# then open http://localhost:8081/admin/ and set endpoint B to http://localhost:8082
 ```
 
-The tunnel doubles as transport security: the API key crosses the public
-internet inside SSH, never as plaintext HTTP. When the node runs with
-`COWIN_API_KEY`, type the key into the page; it is sent as the `X-API-Key`
-header and kept only in memory. A simulated failure auto-recovers after
-about 2 minutes even if Recover is never pressed, and while one zone is
-degraded the other zone's Stop is refused with a 409. Endpoint addresses
-default to the local simulator topology from `benchmark/run_experiment.sh`
+Everything the browser sends - page load, health polls, the API key -
+now travels inside SSH. The endpoint A field already matches the
+panel's own origin; endpoint B is cross-origin loopback, which the
+node's CORS headers allow. When the node runs with `COWIN_API_KEY`, type
+the key into the page; it is sent as the `X-API-Key` header and kept only
+in memory. A simulated failure auto-recovers after about 2 minutes even
+if Recover is never pressed (repeating Stop while a failure is active is
+refused - the window cannot be extended), and while one zone is degraded
+the other zone's Stop is refused with a 409. Endpoint addresses default
+to the local simulator topology from `benchmark/run_experiment.sh`
 (localhost 8080/8081/8082) and can be changed in the page or via
 `?alb=&a=&b=` query parameters.
+
+## Operator runbook and limits (live deployment)
+
+The drill key is never in the template, UserData or the repo: UserData is
+readable via the console and describe-instances, so `COWIN_API_KEY` is
+set by the operator over SSH after boot (`deploy_aws.sh` prints these
+steps after a deploy):
+
+```bash
+# pick a 16+ char key, keep it in a password manager - never in chat
+echo 'COWIN_API_KEY=<the key>' | sudo tee -a /etc/default/cowin-lookup
+sudo systemctl restart cowin   # on BOTH nodes
+```
+
+Operator access itself comes from the `OperatorKeyPair` (an existing EC2
+key pair) plus port 22 scoped to a single `/32` (`OperatorSshCidr`) in
+the template. Explicit limits for anyone holding the key:
+
+- Drill one zone at a time; the interlock refuses a second zone anyway.
+- Each accepted failure lasts at most `COWIN_SIM_AUTO_RECOVER_SECONDS`
+  (default 120 s) and halves capacity for that window; a repeated Stop
+  while a failure is active is refused with 409, so the window cannot
+  be extended by spamming the button.
+- The key only ever travels inside the SSH tunnel; never paste it into
+  chat, tickets or the public site.
+- When the demo is done, stop the instances; there is no ALB surface to
+  unwind.
 
 ## Lookup frontend
 

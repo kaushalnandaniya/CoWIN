@@ -51,16 +51,17 @@ case "$1" in
             REF_PARAM="ParameterKey=AppRepoRef,ParameterValue=main"
         fi
 
-        # The template requires an API key for the /simulate/* endpoints so a
-        # fresh deploy never exposes them unauthenticated. Note that the ALB
-        # listener also denies /simulate/* at the edge; failover drills use
-        # 'fail-zone-a' (EC2 stop), which needs no inbound access.
-        COWIN_API_KEY="${COWIN_API_KEY:-}"
-        if [ -z "$COWIN_API_KEY" ]; then
-            COWIN_API_KEY=$(openssl rand -hex 24 2>/dev/null \
-                || python3 -c 'import secrets; print(secrets.token_hex(24))')
-            echo "Generated an ephemeral COWIN_API_KEY for the /simulate/* endpoints."
-            echo "Save it if you need direct instance-level simulation: $COWIN_API_KEY"
+        # Operator access is required: /simulate drills run over SSH
+        # tunnels, and the API key is set over SSH after boot (never in
+        # UserData, where the console could read it). Pass the key pair
+        # and the single operator IP.
+        KEY_PAIR_NAME="${COWIN_KEY_PAIR:-}"
+        SSH_CIDR="${COWIN_SSH_CIDR:-}"
+        if [ -z "$KEY_PAIR_NAME" ] || [ -z "$SSH_CIDR" ]; then
+            echo "Error: set COWIN_KEY_PAIR (existing EC2 key pair name) and"
+            echo "COWIN_SSH_CIDR (your operator IP in /32 form, e.g. 203.0.113.10/32)."
+            echo "These grant operator SSH access for drills; port 22 opens only to that IP."
+            exit 1
         fi
 
         echo "Deploying CoWIN Two-Zone CloudFormation stack into $REGION..."
@@ -71,7 +72,8 @@ case "$1" in
             --stack-name "$STACK_NAME" \
             --template-body "file://$TEMPLATE_FILE" \
             --parameters ParameterKey=InstanceType,ParameterValue=t3.micro \
-                         ParameterKey=COWINApiKey,ParameterValue="$COWIN_API_KEY" \
+                         ParameterKey=OperatorKeyPair,ParameterValue="$KEY_PAIR_NAME" \
+                         ParameterKey=OperatorSshCidr,ParameterValue="$SSH_CIDR" \
                          "$REF_PARAM" \
             --region "$REGION"
 
@@ -86,6 +88,19 @@ case "$1" in
             --region "$REGION" \
             --query "Stacks[0].Outputs[*].[OutputKey,OutputValue]" \
             --output table
+
+        cat <<'RUNBOOK'
+
+Operator post-deploy steps (the /simulate drill key is never in UserData):
+  1. Pick an operator key (16+ chars), keep it in a password manager.
+  2. On BOTH nodes, over SSH:
+       echo 'COWIN_API_KEY=<the key>' | sudo tee -a /etc/default/cowin-lookup
+       sudo systemctl restart cowin
+  3. For a drill: ssh -L 8081:localhost:8080 ec2-user@<zone A public IP>
+                  ssh -L 8082:localhost:8080 ec2-user@<zone B public IP>
+     then open http://localhost:8081/admin/ and point endpoint A/B at the
+     local forwards. Never send the key over chat or the public ALB.
+RUNBOOK
         ;;
 
     status)
