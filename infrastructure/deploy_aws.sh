@@ -52,15 +52,17 @@ case "$1" in
         fi
 
         # The template requires an API key for the /simulate/* endpoints so a
-        # fresh deploy never exposes them unauthenticated. Note that the ALB
-        # listener also denies /simulate/* at the edge; failover drills use
-        # 'fail-zone-a' (EC2 stop), which needs no inbound access.
+        # fresh deploy never exposes them unauthenticated. The ALB listener
+        # forwards the zone-pinned /simulate/zone-<a|b>/* paths to the
+        # matching zone and denies every other /simulate/* path; the key is
+        # what keeps the controls operator-only. This key is also what the
+        # /admin console's failover buttons send.
         COWIN_API_KEY="${COWIN_API_KEY:-}"
         if [ -z "$COWIN_API_KEY" ]; then
             COWIN_API_KEY=$(openssl rand -hex 24 2>/dev/null \
                 || python3 -c 'import secrets; print(secrets.token_hex(24))')
             echo "Generated an ephemeral COWIN_API_KEY for the /simulate/* endpoints."
-            echo "Save it if you need direct instance-level simulation: $COWIN_API_KEY"
+            echo "Save it - the /admin failover controls need it: $COWIN_API_KEY"
         fi
 
         echo "Deploying CoWIN Two-Zone CloudFormation stack into $REGION..."

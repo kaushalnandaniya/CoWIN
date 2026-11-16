@@ -25,8 +25,15 @@ from the original file-backed version.
 * `GET /metrics`: operational counters (uptime, zone health state, per-endpoint
   request counts, per-status response counts, store info, auth and rate-limit
   counters) as JSON.
-* `GET|POST /simulate/fail`, `GET|POST /simulate/recover`: force the health
+* `GET|POST /simulate/<action>` (`fail`, `recover`): force the health
   check to fail/recover. **Protected by API key when `COWIN_API_KEY` is set.**
+  Operators go through the load balancer's zone-pinned listener path
+  `/simulate/zone-<a|b>/<action>`, which forwards to that zone's target
+  group only; the node re-checks the zone letter and answers `409` on a
+  mismatch. A node refuses `fail` while its peer zone is unhealthy (peer
+  state read from `COWIN_PEER_URL`; an unreachable peer also refuses), and
+  a simulated failure auto-recovers after `COWIN_SIM_AUTO_RECOVER_SECONDS`
+  (default 120) even if nobody recovers it.
 
 ### Configuration (environment variables or CLI flags)
 
@@ -38,8 +45,9 @@ from the original file-backed version.
 | `CENTERS_DATA_FILE` | `--data-file` | `centers_data.json` next to `app.py` | Dataset JSON, loaded into SQLite on first start |
 | `CENTERS_DB_FILE` | `--db-file` | `<data file>` with `.db` suffix | SQLite database path (`:memory:` works) |
 | `COWIN_API_KEY` | `--api-key` | unset | API key required via the `X-API-Key` header on `/simulate/*`. **Unset = dev mode**: endpoints stay open and a warning is logged at startup. A blank value is treated as unset, so an empty key can never match a missing header while `/metrics` reports auth enabled. |
-| `RATE_LIMIT_RPS` | `--rate-limit-rps` | `0` (disabled) | Sustained requests/second allowed per client IP; excess gets a JSON `429` with `Retry-After` |
-| `RATE_LIMIT_BURST` | `--rate-limit-burst` | `2 * RATE_LIMIT_RPS` | Token bucket size per client IP |
+| `COWIN_ZONE_LETTER` | `--zone-letter` | trailing letter of `AWS_AZ` | Zone letter the node claims on zone-pinned `/simulate/zone-<letter>/*` calls; a mismatch answers `409` |
+| `COWIN_PEER_URL` | `--peer-url` | unset | Base URL of the peer zone's node. When set, `fail` is refused (`409`) while the peer is unhealthy or unreachable |
+| `COWIN_SIM_AUTO_RECOVER_SECONDS` | `--sim-auto-recover-seconds` | `120` | Seconds before a simulated failure recovers itself; `0` disables the timer |
 | `LOG_LEVEL` | `--log-level` | `INFO` | Logging verbosity |
 
 `/health` and `/metrics` are exempt from rate limiting so ALB probes and
@@ -75,7 +83,9 @@ exit 2 is a contract/connection failure. A one-zone sample does not prove the
 other node is down. Verify both ALB targets, their EC2 Availability Zones and
 security groups separately. The verifier never provisions or stops anything.
 
-Keep `/simulate/*` protected or restricted in a live deployment. Local health
+Keep `/simulate/*` protected or restricted in a live deployment. The
+zone-pinned operator paths still require the API key, and repeated failures
+cut the site's capacity in half for up to two minutes each time. Local health
 simulation and a real EC2 instance-stop are different experiments. See
 `benchmark/README.md` for the manual event workflow and measurement limits.
 
@@ -84,14 +94,18 @@ simulation and a real EC2 instance-stop are different experiments. See
 **`/admin/`** (`http://localhost:8081/admin/` on a local node) is a small live
 operations page for the two-zone demo: it polls each node's `/health` and the
 load balancer, draws the topology with each zone's current state and the
-serving path, and offers **Stop Zone A** / **Recover Zone A** buttons wired to
-`/simulate/fail` and `/simulate/recover`. When the node runs with
+serving path, and offers **Stop Zone A** / **Recover Zone A** buttons wired to the load
+balancer's zone-pinned `/simulate/zone-a/fail` and
+`/simulate/zone-a/recover` paths, so the drill always reaches Zone A even
+when both nodes are healthy. When the node runs with
 `COWIN_API_KEY`, type the key into the page; it is sent as the `X-API-Key`
-header and kept only in memory. Endpoint addresses default to the local
-simulator topology from `benchmark/run_experiment.sh` (localhost
-8080/8081/8082) and can be changed in the page or via `?alb=&a=&b=` query
-parameters. On the real AWS deployment the ALB denies `/simulate/*` with 403,
-so the controls are for the local setup.
+header and kept only in memory. A simulated failure auto-recovers after
+about 2 minutes even if Recover is never pressed. Endpoint addresses default
+to the local simulator topology from `benchmark/run_experiment.sh`
+(localhost 8080/8081/8082) and can be changed in the page or via
+`?alb=&a=&b=` query parameters. On the real AWS deployment the ALB denies
+every `/simulate/*` path with 403 except the zone-pinned operator paths,
+which the node still gates on the API key.
 
 ## Lookup frontend
 

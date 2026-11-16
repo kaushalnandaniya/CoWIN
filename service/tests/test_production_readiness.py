@@ -503,5 +503,173 @@ class TestTightenedValidation(LiveServerTestCase):
             self.assertEqual(headers.get("Allow"), "GET, POST, OPTIONS", method)
 
 
+class TestZonePinnedSimulate(LiveServerTestCase):
+    """Zone-qualified /simulate/zone-<letter>/* commands.
+
+    The load balancer routes these to a single-zone target group; the node
+    double-checks the letter so a misrouted command can never flip the
+    wrong zone. The test zone is test-zone-1a, i.e. letter 'a'.
+    """
+
+    def tearDown(self):
+        # Never leak a simulated failure into the next test.
+        self.request("/simulate/recover")
+
+    def test_matching_zone_command_runs(self):
+        status, _, body = self.request("/simulate/zone-a/fail", method="POST")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "unhealthy")
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 500)
+        status, _, body = self.request("/simulate/zone-a/recover", method="POST")
+        self.assertEqual(status, 200)
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 200)
+
+    def test_wrong_zone_command_is_refused_with_409(self):
+        status, _, body = self.request("/simulate/zone-b/fail", method="POST")
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "Conflict")
+        # State untouched: the node stays healthy.
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 200)
+
+    def test_fail_response_reports_auto_recover_bound(self):
+        status, _, body = self.request("/simulate/zone-a/fail", method="POST")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["auto_recover_in_seconds"],
+                         app.DEFAULT_SIM_AUTO_RECOVER_SECONDS)
+
+
+class TestSimulateAuthOnZonePaths(LiveServerTestCase):
+    """Zone-qualified paths are protected exactly like the plain ones."""
+
+    server_kwargs = {"api_key": TEST_API_KEY}
+
+    def tearDown(self):
+        self.request("/simulate/recover",
+                     headers={app.AUTH_HEADER: TEST_API_KEY})
+
+    def test_zone_path_requires_key(self):
+        status, _, _ = self.request("/simulate/zone-a/fail", method="POST")
+        self.assertEqual(status, 401)
+
+    def test_zone_path_with_key_runs(self):
+        status, _, _ = self.request("/simulate/zone-a/fail", method="POST",
+                                    headers={app.AUTH_HEADER: TEST_API_KEY})
+        self.assertEqual(status, 200)
+
+    def test_rejected_key_is_never_logged(self):
+        secret = "never-logged-secret"
+        with self.assertLogs("cowin-lookup", level="WARNING") as captured:
+            status, _, _ = self.request("/simulate/zone-a/fail", method="POST",
+                                        headers={app.AUTH_HEADER: secret})
+        self.assertEqual(status, 401)
+        self.assertNotIn(secret, "\n".join(captured.output))
+
+
+class TestSimulateAutoRecover(unittest.TestCase):
+    """A simulated failure is bounded: the node restores its own health
+    after the configured delay even if /recover never comes, and a process
+    restart always comes back healthy."""
+
+    def test_auto_recovers_after_configured_delay(self):
+        httpd, thread, base = start_test_server(auto_recover_seconds=0.3)
+        try:
+            req = urllib.request.Request(base + "/simulate/fail", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            # Failing right after the command...
+            req = urllib.request.Request(base + "/health")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 500)
+            # ...and healthy again once the timer fires, untouched.
+            time.sleep(0.8)
+            with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            stop_test_server(httpd, thread)
+
+    def test_manual_recover_cancels_pending_auto_recover(self):
+        httpd, thread, base = start_test_server(auto_recover_seconds=30)
+        try:
+            for path in ("/simulate/fail", "/simulate/recover"):
+                req = urllib.request.Request(base + path, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 200)
+            self.assertIsNone(httpd.auto_recover_timer)
+        finally:
+            stop_test_server(httpd, thread)
+
+    def test_restart_comes_back_healthy(self):
+        # A simulated failure is process-local runtime state: if the node
+        # restarts mid-drill (systemd Restart=always), it serves healthy
+        # again instead of being stuck failing.
+        httpd, thread, base = start_test_server()
+        req = urllib.request.Request(base + "/simulate/fail", method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        port = httpd.server_address[1]
+        stop_test_server(httpd, thread)
+
+        httpd2, thread2, base2 = start_test_server()
+        try:
+            with urllib.request.urlopen(base2 + "/health", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            stop_test_server(httpd2, thread2)
+        self.assertNotEqual(port, 0)  # first server really was running
+
+
+class TestSimulatePeerInterlock(unittest.TestCase):
+    """The cross-zone safety invariant: with a peer configured, a node
+    refuses /simulate/fail while the other zone is unhealthy, so both
+    zones can never be degraded at once."""
+
+    def setUp(self):
+        self.a = start_test_server(zone="test-zone-1a")
+        self.b = start_test_server(zone="test-zone-1b")
+        # Wire the peer interlock both ways (config is read per request).
+        self.a[0].config.peer_url = self.b[2]
+        self.b[0].config.peer_url = self.a[2]
+
+    def tearDown(self):
+        for server in (self.a, self.b):
+            if server is None:
+                continue
+            req = urllib.request.Request(server[2] + "/simulate/recover",
+                                         method="POST")
+            try:
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+            stop_test_server(server[0], server[1])
+
+    def _post(self, base, path):
+        req = urllib.request.Request(base + path, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_refuses_to_fail_second_zone(self):
+        self.assertEqual(self._post(self.a[2], "/simulate/zone-a/fail"), 200)
+        # Peer A is now failing: B must refuse a second degradation.
+        self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 409)
+        # B stayed healthy.
+        with urllib.request.urlopen(self.b[2] + "/health", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        # After A recovers, a drill on B is allowed again.
+        self.assertEqual(self._post(self.a[2], "/simulate/zone-a/recover"), 200)
+        self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 200)
+
+    def test_unreachable_peer_also_refuses(self):
+        stop_test_server(self.a[0], self.a[1])
+        self.a = None
+        self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 409)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

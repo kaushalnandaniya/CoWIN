@@ -125,9 +125,76 @@ class ALBProxyHandler(BaseHTTPRequestHandler):
         }
         self.wfile.write(json.dumps(body, indent=2).encode())
 
-    def do_GET(self):
-        global RR_INDEX
+    def _pick_target(self):
+        """Choose the backend for this request.
 
+        Zone-pinned simulation paths (/simulate/zone-a/*, /simulate/zone-b/*)
+        mirror the ALB listener rules that forward to single-zone target
+        groups: they always reach their pinned target, even while it is
+        unhealthy - a single-target group fails open, which is what lets a
+        /recover command reach a failed node. Everything else round-robins
+        among healthy targets. Returns None (after writing a 503) when an
+        unpinned request finds no healthy target.
+        """
+        global RR_INDEX
+        parts = self.path.strip("/").split("/")
+        if len(parts) >= 3 and parts[0] == "simulate" and parts[1] in ("zone-a", "zone-b"):
+            index = 0 if parts[1] == "zone-a" else 1
+            with TARGETS_LOCK:
+                return TARGETS[index]
+
+        with TARGETS_LOCK:
+            healthy_targets = [t for t in TARGETS if t["status"] == "healthy"]
+        if not healthy_targets:
+            self._send_alb_error(503, "503 Service Unavailable: No healthy targets in target group.")
+            return None
+        with RR_LOCK:
+            target = healthy_targets[RR_INDEX % len(healthy_targets)]
+            RR_INDEX += 1
+        return target
+
+    def _forward(self, target, body=None):
+        """Proxy the request to the chosen target and relay the response."""
+        target_url = f"http://{target['host']}:{target['port']}{self.path}"
+        try:
+            req = urllib.request.Request(
+                target_url,
+                data=body,
+                headers={k: v for k, v in self.headers.items() if k.lower() != "host"},
+                method=self.command
+            )
+            req.add_header("X-Forwarded-For", self.client_address[0])
+            req.add_header("X-Forwarded-Proto", "http")
+            req.add_header("X-Forwarded-Port", str(PORT))
+
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                self._relay(resp.status, resp.getheaders(), resp.read(), target)
+
+        except HTTPError as e:
+            # A reached target's error status (401/409/500/...) is a real
+            # answer, not a gateway failure: relay it verbatim so callers
+            # see auth rejections and safety refusals.
+            self._relay(e.code, e.headers.items(), e.read(), target)
+        except (URLError, socket.timeout, ConnectionRefusedError) as e:
+            # Backend failed before health checker evicted it -> emit 502 Bad Gateway
+            with TARGETS_LOCK:
+                target["total_errors"] += 1
+            self._send_alb_error(502, f"502 Bad Gateway: Target {target['name']} connection failed ({str(e)})")
+
+    def _relay(self, status, headers, content, target):
+        self.send_response(status)
+        for header, val in headers:
+            if header.lower() not in ("transfer-encoding", "content-length"):
+                self.send_header(header, val)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("X-ALB-Target", target["id"])
+        self.send_header("X-ALB-Zone", target["zone"])
+        self.end_headers()
+        self.wfile.write(content)
+        with TARGETS_LOCK:
+            target["total_requests"] += 1
+
+    def do_GET(self):
         # ALB management/diagnostics endpoint
         if self.path == "/alb/status":
             self.send_response(200)
@@ -153,50 +220,26 @@ class ALBProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(info, indent=2).encode())
             return
 
-        # Pick a target using round-robin among healthy targets
-        target = None
-        with TARGETS_LOCK:
-            healthy_targets = [t for t in TARGETS if t["status"] == "healthy"]
+        target = self._pick_target()
+        if target is not None:
+            self._forward(target)
 
-        if not healthy_targets:
-            self._send_alb_error(503, "503 Service Unavailable: No healthy targets in target group.")
+    def do_OPTIONS(self):
+        # CORS preflight for the admin console, which is served by a node but
+        # drives the controls through the load balancer cross-origin.
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "X-API-Key, Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        target = self._pick_target()
+        if target is None:
             return
-
-        with RR_LOCK:
-            target = healthy_targets[RR_INDEX % len(healthy_targets)]
-            RR_INDEX += 1
-
-        # Proxy request to chosen target
-        target_url = f"http://{target['host']}:{target['port']}{self.path}"
-        try:
-            req = urllib.request.Request(
-                target_url,
-                headers={k: v for k, v in self.headers.items() if k.lower() != "host"}
-            )
-            req.add_header("X-Forwarded-For", self.client_address[0])
-            req.add_header("X-Forwarded-Proto", "http")
-            req.add_header("X-Forwarded-Port", str(PORT))
-
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
-                content = resp.read()
-                self.send_response(resp.status)
-                for header, val in resp.getheaders():
-                    if header.lower() not in ("transfer-encoding", "content-length"):
-                        self.send_header(header, val)
-                self.send_header("Content-Length", str(len(content)))
-                self.send_header("X-ALB-Target", target["id"])
-                self.send_header("X-ALB-Zone", target["zone"])
-                self.end_headers()
-                self.wfile.write(content)
-
-                with TARGETS_LOCK:
-                    target["total_requests"] += 1
-
-        except (URLError, socket.timeout, ConnectionRefusedError) as e:
-            # Backend failed before health checker evicted it -> emit 502 Bad Gateway
-            with TARGETS_LOCK:
-                target["total_errors"] += 1
-            self._send_alb_error(502, f"502 Bad Gateway: Target {target['name']} connection failed ({str(e)})")
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length > 0 else None
+        self._forward(target, body=body)
 
     def log_message(self, format, *args):
         # Mute per-request proxy logs to keep stdout clean

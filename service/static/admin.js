@@ -235,7 +235,7 @@
     render();
   }
 
-  async function control(path, label) {
+  async function control(zoneLetter, action, label) {
     const result = $('control-result');
     result.className = 'control-result';
     result.textContent = label + '...';
@@ -243,26 +243,34 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
+      // Zone-pinned path: the load balancer (local simulator or AWS listener
+      // rule) forwards /simulate/zone-<letter>/* to that zone's node only,
+      // and the node itself double-checks the letter before acting.
       const headers = {};
       if (apiKey) headers['X-API-Key'] = apiKey;
-      const response = await fetch(cfg.a + path, { method: 'POST', headers, signal: controller.signal });
+      const response = await fetch(`${cfg.alb}/simulate/zone-${zoneLetter}/${action}`, { method: 'POST', headers, signal: controller.signal });
       if (response.ok) {
         result.textContent = label + ': command accepted.';
         result.classList.add('ok');
-        log(label + ': command accepted by Zone A', 'log-ok');
+        log(label + ': command accepted by Zone ' + zoneLetter.toUpperCase(), 'log-ok');
+        if (action === 'fail') log('Auto-recover is armed: the zone restores itself after about 2 minutes even without Recover', 'log-ok');
       } else if (response.status === 401) {
         result.textContent = label + ': rejected - the API key is missing or wrong.';
         result.classList.add('err');
         log(label + ': 401 unauthorized (check the API key)', 'log-bad');
+      } else if (response.status === 409) {
+        result.textContent = label + ': refused - the other zone is not healthy.';
+        result.classList.add('err');
+        log(label + ': 409 refused (safety interlock)', 'log-bad');
       } else {
         result.textContent = `${label}: HTTP ${response.status}.`;
         result.classList.add('err');
         log(`${label}: HTTP ${response.status}`, 'log-bad');
       }
     } catch (error) {
-      result.textContent = label + ': could not reach the Zone A node.';
+      result.textContent = label + ': could not reach the load balancer.';
       result.classList.add('err');
-      log(label + ': Zone A node unreachable', 'log-bad');
+      log(label + ': load balancer unreachable', 'log-bad');
     } finally {
       clearTimeout(timeout);
       for (const id of ['btn-stop', 'btn-recover']) $(id).disabled = false;
@@ -287,8 +295,8 @@
   $('cfg-b').value = cfg.b;
   $('cfg-apply').addEventListener('click', applyConfig);
   $('api-key').addEventListener('input', event => { apiKey = event.target.value; });
-  $('btn-stop').addEventListener('click', () => control('/simulate/fail', 'Stop Zone A'));
-  $('btn-recover').addEventListener('click', () => control('/simulate/recover', 'Recover Zone A'));
+  $('btn-stop').addEventListener('click', () => control('a', 'fail', 'Stop Zone A'));
+  $('btn-recover').addEventListener('click', () => control('a', 'recover', 'Recover Zone A'));
 
   poll();
   timer = setInterval(poll, POLL_MS);

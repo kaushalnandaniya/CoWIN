@@ -146,7 +146,9 @@ Resources:
         - Key: Name
           Value: CoWIN-ALB-SG
 
-  # Instance Security Group: Inbound HTTP 8080 ONLY from ALB
+  # Instance Security Group: Inbound HTTP 8080 ONLY from ALB and from the
+  # sibling node (the peer-health interlock that prevents a simulated
+  # failure in both zones at once).
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -157,6 +159,10 @@ Resources:
           FromPort: 8080
           ToPort: 8080
           SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
       Tags:
         - Key: Name
           Value: CoWIN-Instance-SG
@@ -203,6 +209,50 @@ Resources:
         - Key: Name
           Value: CoWIN-Lookup-TG
 
+  ALBTargetGroupZoneA:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cowin-lookup-tg-zone-a
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref CoWINVPC
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckPort: '8080'
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 2
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref InstanceZoneA
+          Port: 8080
+      Tags:
+        - Key: Name
+          Value: CoWIN-Lookup-TG-ZoneA
+
+  ALBTargetGroupZoneB:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cowin-lookup-tg-zone-b
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref CoWINVPC
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckPort: '8080'
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 2
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref InstanceZoneB
+          Port: 8080
+      Tags:
+        - Key: Name
+          Value: CoWIN-Lookup-TG-ZoneB
+
   ALBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -213,14 +263,46 @@ Resources:
       Port: 80
       Protocol: HTTP
 
-  # Default-deny at the edge: the failure-injection controls are never
-  # public on a fresh deploy. Failover tests use stop/start of the Zone A
-  # instance (deploy_aws.sh fail-zone-a), which needs no inbound access.
-  ALBSimulateDenyRule:
+  # Zone-pinned simulation controls: /simulate/zone-a/* forwards only to
+  # the Zone A target group (and likewise for zone-b), so a failover drill
+  # hits one zone deterministically. A single-target group fails open, so
+  # /simulate/zone-a/recover still reaches the node while it is drained.
+  # Every node still requires the X-API-Key header on /simulate/*, so only
+  # key-holders can trigger a drill; unqualified /simulate/* stays denied.
+  ALBSimulateZoneARule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       ListenerArn: !Ref ALBListener
       Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /simulate/zone-a/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroupZoneA
+
+  ALBSimulateZoneBRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /simulate/zone-b/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroupZoneB
+
+  # Default-deny at the edge for every other /simulate/* path.
+  ALBSimulateDenyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 3
       Conditions:
         - Field: path-pattern
           PathPatternConfig:
@@ -231,7 +313,7 @@ Resources:
           FixedResponseConfig:
             StatusCode: '403'
             ContentType: application/json
-            MessageBody: '{"error":"Forbidden","message":"Simulation controls are disabled at the load balancer"}'
+            MessageBody: '{"error":"Forbidden","message":"Use the zone-pinned path /simulate/zone-<a|b>/* with the operator API key"}'
 
   # =========================================================================
   # 4. COMPUTE NODES (Redundant EC2 Instances across Zone A and Zone B)
@@ -250,61 +332,65 @@ Resources:
         - Key: Zone
           Value: Zone-A
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          yum update -y
-          yum install -y python3
-          mkdir -p /opt/cowin/static
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              yum update -y
+              yum install -y python3
+              mkdir -p /opt/cowin/static
 
-          # Fetch the pinned application artifact (service code, dataset, UI assets)
-          # instead of embedding drifting copies in this template.
-          BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
-          fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
-          fetch "$BASE_URL/app.py" /opt/cowin/app.py
-          fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
-          fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
-          for asset in index.html styles.css app.js admin.html admin.css admin.js; do
-            fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
-          done
+              # Fetch the pinned application artifact (service code, dataset, UI assets)
+              # instead of embedding drifting copies in this template.
+              BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
+              fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
+              fetch "$BASE_URL/app.py" /opt/cowin/app.py
+              fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
+              fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
+              for asset in index.html styles.css app.js admin.html admin.css admin.js; do
+                fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
+              done
 
-          # Get IMDSv2 token & instance metadata
-          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+              # Get IMDSv2 token & instance metadata
+              TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+              AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+              IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
-          cat << EOF > /etc/systemd/system/cowin.service
-          [Unit]
-          Description=CoWIN Lookup Microservice
-          After=network.target
+              cat << EOF > /etc/systemd/system/cowin.service
+              [Unit]
+              Description=CoWIN Lookup Microservice
+              After=network.target
 
-          [Service]
-          Type=simple
-          Environment="AWS_AZ=$AZ"
-          Environment="AWS_INSTANCE_ID=$IID"
-          EnvironmentFile=-/etc/default/cowin-lookup
-          ExecStart=/usr/bin/python3 /opt/cowin/app.py
-          Restart=always
-          RestartSec=3
+              [Service]
+              Type=simple
+              Environment="AWS_AZ=$AZ"
+              Environment="AWS_INSTANCE_ID=$IID"
+              EnvironmentFile=-/etc/default/cowin-lookup
+              ExecStart=/usr/bin/python3 /opt/cowin/app.py
+              Restart=always
+              RestartSec=3
 
-          [Install]
-          WantedBy=multi-user.target
-          EOF
+              [Install]
+              WantedBy=multi-user.target
+              EOF
 
-          mkdir -p /etc/default
-          cat << 'CONF' > /etc/default/cowin-lookup
-          # Service configuration (see service/README.md).
-          COWIN_API_KEY=${COWINApiKey}
-          # Per-client-IP rate limiting (0 = disabled):
-          #RATE_LIMIT_RPS=50
-          #RATE_LIMIT_BURST=100
-          #CENTERS_DB_FILE=/opt/cowin/centers.db
-          CONF
+              mkdir -p /etc/default
+              cat << 'CONF' > /etc/default/cowin-lookup
+              # Service configuration (see service/README.md).
+              COWIN_API_KEY=${COWINApiKey}
+              COWIN_ZONE_LETTER=a
+              COWIN_PEER_URL=http://${PeerPrivateIp}:8080
+              # Per-client-IP rate limiting (0 = disabled):
+              #RATE_LIMIT_RPS=50
+              #RATE_LIMIT_BURST=100
+              #CENTERS_DB_FILE=/opt/cowin/centers.db
+              CONF
 
-          systemctl daemon-reload
-          systemctl enable cowin
-          systemctl start cowin
-
+              systemctl daemon-reload
+              systemctl enable cowin
+              systemctl start cowin
+            - PeerPrivateIp: !GetAtt InstanceZoneB.PrivateIp
   InstanceZoneB:
     Type: AWS::EC2::Instance
     Properties:
@@ -319,61 +405,65 @@ Resources:
         - Key: Zone
           Value: Zone-B
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          yum update -y
-          yum install -y python3
-          mkdir -p /opt/cowin/static
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              yum update -y
+              yum install -y python3
+              mkdir -p /opt/cowin/static
 
-          # Fetch the pinned application artifact (service code, dataset, UI assets)
-          # instead of embedding drifting copies in this template.
-          BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
-          fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
-          fetch "$BASE_URL/app.py" /opt/cowin/app.py
-          fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
-          fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
-          for asset in index.html styles.css app.js admin.html admin.css admin.js; do
-            fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
-          done
+              # Fetch the pinned application artifact (service code, dataset, UI assets)
+              # instead of embedding drifting copies in this template.
+              BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
+              fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
+              fetch "$BASE_URL/app.py" /opt/cowin/app.py
+              fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
+              fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
+              for asset in index.html styles.css app.js admin.html admin.css admin.js; do
+                fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
+              done
 
-          # Get IMDSv2 token & instance metadata
-          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+              # Get IMDSv2 token & instance metadata
+              TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+              AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+              IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
-          cat << EOF > /etc/systemd/system/cowin.service
-          [Unit]
-          Description=CoWIN Lookup Microservice
-          After=network.target
+              cat << EOF > /etc/systemd/system/cowin.service
+              [Unit]
+              Description=CoWIN Lookup Microservice
+              After=network.target
 
-          [Service]
-          Type=simple
-          Environment="AWS_AZ=$AZ"
-          Environment="AWS_INSTANCE_ID=$IID"
-          EnvironmentFile=-/etc/default/cowin-lookup
-          ExecStart=/usr/bin/python3 /opt/cowin/app.py
-          Restart=always
-          RestartSec=3
+              [Service]
+              Type=simple
+              Environment="AWS_AZ=$AZ"
+              Environment="AWS_INSTANCE_ID=$IID"
+              EnvironmentFile=-/etc/default/cowin-lookup
+              ExecStart=/usr/bin/python3 /opt/cowin/app.py
+              Restart=always
+              RestartSec=3
 
-          [Install]
-          WantedBy=multi-user.target
-          EOF
+              [Install]
+              WantedBy=multi-user.target
+              EOF
 
-          mkdir -p /etc/default
-          cat << 'CONF' > /etc/default/cowin-lookup
-          # Service configuration (see service/README.md).
-          COWIN_API_KEY=${COWINApiKey}
-          # Per-client-IP rate limiting (0 = disabled):
-          #RATE_LIMIT_RPS=50
-          #RATE_LIMIT_BURST=100
-          #CENTERS_DB_FILE=/opt/cowin/centers.db
-          CONF
+              mkdir -p /etc/default
+              cat << 'CONF' > /etc/default/cowin-lookup
+              # Service configuration (see service/README.md).
+              COWIN_API_KEY=${COWINApiKey}
+              COWIN_ZONE_LETTER=b
+              COWIN_PEER_URL=http://${PeerPrivateIp}:8080
+              # Per-client-IP rate limiting (0 = disabled):
+              #RATE_LIMIT_RPS=50
+              #RATE_LIMIT_BURST=100
+              #CENTERS_DB_FILE=/opt/cowin/centers.db
+              CONF
 
-          systemctl daemon-reload
-          systemctl enable cowin
-          systemctl start cowin
-
+              systemctl daemon-reload
+              systemctl enable cowin
+              systemctl start cowin
+            - PeerPrivateIp: !GetAtt InstanceZoneA.PrivateIp
 Outputs:
   VPCId:
     Description: VPC Identifier
@@ -398,5 +488,6 @@ Outputs:
   InstanceBZoneBId:
     Description: EC2 Instance ID in Zone B (redundant survivor instance)
     Value: !Ref InstanceZoneB
+
 
 

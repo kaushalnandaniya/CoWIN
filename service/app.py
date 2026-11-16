@@ -43,6 +43,8 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 logger = logging.getLogger("cowin-lookup")
@@ -69,6 +71,38 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # is configured. Read endpoints (health, lookup, info, metrics) stay open.
 AUTH_HEADER = "X-API-Key"
 PROTECTED_PATHS = frozenset({"/simulate/fail", "/simulate/recover"})
+
+# Default bound on a simulated failure: the node restores its own health
+# this many seconds after /simulate/fail, so a demo can never be left
+# degraded by accident. 0 disables the timer. Overridable via
+# COWIN_SIM_AUTO_RECOVER_SECONDS.
+DEFAULT_SIM_AUTO_RECOVER_SECONDS = 120.0
+
+
+def parse_simulate_path(path):
+    """Parse a simulation control path.
+
+    '/simulate/fail'              -> ('fail', None)
+    '/simulate/zone-a/recover'    -> ('recover', 'a')
+    anything else                 -> (None, None)
+
+    The zone-qualified form is what the load balancer's zone-pinned
+    listener rules forward; the node verifies the letter against its own
+    configured zone so a misrouted command can never flip the wrong zone.
+    """
+    parts = path.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "simulate" and parts[1] in ("fail", "recover"):
+        return parts[1], None
+    if (len(parts) == 3 and parts[0] == "simulate"
+            and parts[1] in ("zone-a", "zone-b") and parts[2] in ("fail", "recover")):
+        return parts[2], parts[1][-1]
+    return None, None
+
+
+def is_protected_path(path):
+    """True for every mutating /simulate/* path, zone-qualified or not."""
+    action, _ = parse_simulate_path(path)
+    return action is not None
 
 # Paths exempt from rate limiting: ALB health probes and metrics scrapers
 # must never be throttled, or failover detection would break.
@@ -97,7 +131,8 @@ class ServiceConfig:
 
     def __init__(self, host="0.0.0.0", port=DEFAULT_PORT, zone=DEFAULT_ZONE,
                  instance_id=None, data_file=None, db_file=None, api_key=None,
-                 rate_limit_rps=0.0, rate_limit_burst=None):
+                 rate_limit_rps=0.0, rate_limit_burst=None, zone_letter=None,
+                 peer_url=None, auto_recover_seconds=None):
         self.host = host
         self.port = port
         self.zone = zone
@@ -109,6 +144,19 @@ class ServiceConfig:
         if api_key is not None and not str(api_key).strip():
             api_key = None
         self.api_key = api_key
+        # Short letter identifying this node's zone ('a' for ap-south-1a).
+        # Used to verify zone-pinned /simulate/zone-<letter>/* commands.
+        # Defaults to the trailing letter of the zone name.
+        if zone_letter is None:
+            zone_letter = (zone or "a").rstrip()[-1:].lower() or "a"
+        self.zone_letter = zone_letter
+        # Base URL of the sibling zone's node (e.g. http://10.0.2.x:8080).
+        # When set, /simulate/fail is refused while the peer is unhealthy,
+        # so both zones can never be degraded at once.
+        self.peer_url = (peer_url or "").strip().rstrip("/") or None
+        if auto_recover_seconds is None:
+            auto_recover_seconds = DEFAULT_SIM_AUTO_RECOVER_SECONDS
+        self.auto_recover_seconds = float(auto_recover_seconds)
         self.rate_limit_rps = float(rate_limit_rps or 0.0)
         self.rate_limit_burst = (float(rate_limit_burst) if rate_limit_burst
                                  else None)
@@ -131,6 +179,9 @@ class ServiceConfig:
             data_file=os.environ.get("CENTERS_DATA_FILE"),
             db_file=os.environ.get("CENTERS_DB_FILE"),
             api_key=os.environ.get("COWIN_API_KEY"),
+            zone_letter=os.environ.get("COWIN_ZONE_LETTER"),
+            peer_url=os.environ.get("COWIN_PEER_URL"),
+            auto_recover_seconds=os.environ.get("COWIN_SIM_AUTO_RECOVER_SECONDS"),
             rate_limit_rps=float(os.environ.get("RATE_LIMIT_RPS", 0.0)),
             rate_limit_burst=(float(os.environ["RATE_LIMIT_BURST"])
                               if os.environ.get("RATE_LIMIT_BURST") else None),
@@ -560,15 +611,12 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         # Administrative controls to test target health transitions (supports GET and POST)
-        if path in PROTECTED_PATHS and not self._check_auth():
+        if is_protected_path(path) and not self._check_auth():
             return
 
-        if path == "/simulate/fail":
-            self._simulate_fail()
-            return
-
-        if path == "/simulate/recover":
-            self._simulate_recover()
+        sim_action, sim_zone = parse_simulate_path(path)
+        if sim_action:
+            self._run_simulate(sim_action, sim_zone)
             return
 
         # Centers Lookup Endpoint
@@ -674,15 +722,12 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             return
 
         # Administrative controls to test target health transitions
-        if path in PROTECTED_PATHS and not self._check_auth():
+        if is_protected_path(path) and not self._check_auth():
             return
 
-        if path == "/simulate/fail":
-            self._simulate_fail()
-            return
-
-        if path == "/simulate/recover":
-            self._simulate_recover()
+        sim_action, sim_zone = parse_simulate_path(path)
+        if sim_action:
+            self._run_simulate(sim_action, sim_zone)
             return
 
         self._write_json({"error": "Unknown POST action"}, status_code=404)
@@ -776,16 +821,104 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             },
         })
 
+    def _run_simulate(self, action, zone_letter):
+        """Run a verified /simulate command.
+
+        A zone-qualified command only runs on the node whose configured
+        zone letter matches; a misrouted one gets a 409 so it can never
+        flip the wrong zone.
+        """
+        if zone_letter and zone_letter != self.config.zone_letter:
+            logger.warning(
+                "Rejected /simulate/zone-%s/%s: this node is zone '%s' (%s)",
+                zone_letter, action, self.config.zone_letter, self.config.zone)
+            self._write_json({
+                "error": "Conflict",
+                "message": (f"This node is zone '{self.config.zone_letter}' "
+                            f"({self.config.zone}); the command targeted "
+                            f"zone '{zone_letter}'."),
+                "zone": self.config.zone
+            }, status_code=409)
+            return
+        if action == "fail":
+            self._simulate_fail()
+        else:
+            self._simulate_recover()
+
+    def _peer_allows_failure(self):
+        """Safety interlock: refuse to fail while the peer zone is down.
+
+        Returns True when the simulated failure may proceed; otherwise
+        writes the JSON 409 and returns False. With no COWIN_PEER_URL
+        configured (single-node dev setups) the check is skipped. An
+        unreachable peer counts as unhealthy: never degrade the second
+        zone while the first may already be down for real.
+        """
+        peer = self.config.peer_url
+        if not peer:
+            return True
+        try:
+            req = urllib.request.Request(peer + "/health",
+                                         headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                peer_healthy = resp.status == 200
+        except urllib.error.HTTPError:
+            peer_healthy = False  # answering, but failing health checks
+        except Exception:
+            peer_healthy = False  # unreachable: real outage or stopped
+        if peer_healthy:
+            return True
+        logger.warning(
+            "Refused simulated failure: peer zone at %s is not healthy", peer)
+        self._write_json({
+            "error": "Conflict",
+            "message": ("The other zone is not healthy; refusing to "
+                        "degrade a second zone."),
+            "zone": self.config.zone
+        }, status_code=409)
+        return False
+
+    def _schedule_auto_recover(self):
+        """Bound the disruption: restore health automatically after the
+        configured delay, even if nobody calls /simulate/recover."""
+        seconds = self.config.auto_recover_seconds
+        if seconds <= 0:
+            return
+        self._cancel_auto_recover()
+
+        def _auto_recover():
+            self.state.set_unhealthy(False)
+            logger.info("Simulated failure auto-recovered after %.0fs - "
+                        "/health restored to 200", seconds)
+
+        timer = threading.Timer(seconds, _auto_recover)
+        timer.daemon = True
+        timer.start()
+        self.server.auto_recover_timer = timer
+
+    def _cancel_auto_recover(self):
+        timer = getattr(self.server, "auto_recover_timer", None)
+        if timer is not None:
+            timer.cancel()
+            self.server.auto_recover_timer = None
+
     def _simulate_fail(self):
+        if not self._peer_allows_failure():
+            return
         self.state.set_unhealthy(True)
+        self._schedule_auto_recover()
         logger.warning("Simulated failure ENABLED - /health now returns 500")
         self._write_json({
             "message": "Health check now returning 500",
             "zone": self.config.zone,
-            "status": "unhealthy"
+            "status": "unhealthy",
+            "auto_recover_in_seconds": (self.config.auto_recover_seconds
+                                        if self.config.auto_recover_seconds > 0
+                                        else None)
         })
 
     def _simulate_recover(self):
+        self._cancel_auto_recover()
         self.state.set_unhealthy(False)
         logger.info("Simulated failure cleared - /health restored to 200")
         self._write_json({
@@ -809,6 +942,7 @@ class CoWINHTTPServer(ThreadingHTTPServer):
         self.store = build_store(config)
         self.rate_limiter = RateLimiter(config.rate_limit_rps,
                                         config.rate_limit_burst)
+        self.auto_recover_timer = None
         super().__init__((config.host, config.port), CoWINLookupHandler)
 
     def server_close(self):
@@ -889,6 +1023,18 @@ if __name__ == "__main__":
                         help="Path to the centers SQLite database (env: CENTERS_DB_FILE)")
     parser.add_argument("--api-key", type=str, default=os.environ.get("COWIN_API_KEY", None),
                         help="API key required on mutating endpoints (env: COWIN_API_KEY)")
+    parser.add_argument("--zone-letter", type=str, default=os.environ.get("COWIN_ZONE_LETTER", None),
+                        help="Short zone letter ('a'/'b') used to verify zone-pinned "
+                             "/simulate/zone-<letter>/* commands; defaults to the "
+                             "trailing letter of --zone (env: COWIN_ZONE_LETTER)")
+    parser.add_argument("--peer-url", type=str, default=os.environ.get("COWIN_PEER_URL", None),
+                        help="Base URL of the sibling zone's node; while the peer is "
+                             "unhealthy /simulate/fail is refused (env: COWIN_PEER_URL)")
+    parser.add_argument("--sim-auto-recover-seconds", type=float,
+                        default=float(os.environ.get("COWIN_SIM_AUTO_RECOVER_SECONDS",
+                                      DEFAULT_SIM_AUTO_RECOVER_SECONDS)),
+                        help="Seconds after which a simulated failure auto-recovers; "
+                             "0 disables (env: COWIN_SIM_AUTO_RECOVER_SECONDS)")
     parser.add_argument("--rate-limit-rps", type=float,
                         default=float(os.environ.get("RATE_LIMIT_RPS", 0.0)),
                         help="Sustained requests/second allowed per client IP; "
@@ -904,6 +1050,8 @@ if __name__ == "__main__":
     config = ServiceConfig(host=args.host, port=args.port, zone=args.zone,
                            instance_id=args.instance_id, data_file=args.data_file,
                            db_file=args.db_file, api_key=args.api_key,
+                           zone_letter=args.zone_letter, peer_url=args.peer_url,
+                           auto_recover_seconds=args.sim_auto_recover_seconds,
                            rate_limit_rps=args.rate_limit_rps,
                            rate_limit_burst=args.rate_limit_burst)
     serve(config, args.log_level)
