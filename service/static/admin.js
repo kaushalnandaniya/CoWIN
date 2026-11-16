@@ -4,14 +4,17 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
+  const SVG_NS = 'http://www.w3.org/2000/svg';
   const DEFAULTS = { alb: 'http://localhost:8080', a: 'http://localhost:8081', b: 'http://localhost:8082' };
   const STORE_KEY = 'cowin-admin-endpoints';
   const POLL_MS = 1500;
+  const SPARK_LEN = 30;
 
   let cfg = loadConfig();
   let apiKey = '';
   let timer = null;
   const state = { a: 'unknown', b: 'unknown', alb: 'unknown', serving: null };
+  const latencyHistory = { a: [], b: [] };
 
   function loadConfig() {
     const params = new URLSearchParams(location.search);
@@ -44,13 +47,14 @@
   async function probe(baseUrl, path) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
+    const started = performance.now();
     try {
       const response = await fetch(baseUrl + path, { cache: 'no-store', signal: controller.signal });
       let data = null;
       try { data = await response.json(); } catch (e) { data = null; }
-      return { reachable: true, status: response.status, data };
+      return { reachable: true, status: response.status, data, ms: performance.now() - started };
     } catch (error) {
-      return { reachable: false, status: 0, data: null };
+      return { reachable: false, status: 0, data: null, ms: performance.now() - started };
     } finally {
       clearTimeout(timeout);
     }
@@ -66,8 +70,13 @@
 
   function setNode(id, cls, stateEl, text) {
     const node = $(id);
-    node.classList.remove('node-ok', 'node-bad', 'node-down', 'node-unknown', 'node-idle');
+    const changed = !node.classList.contains(cls);
+    node.classList.remove('node-ok', 'node-bad', 'node-down', 'node-unknown', 'node-idle', 'node-just-changed');
     node.classList.add(cls);
+    if (changed) {
+      node.classList.add('node-just-changed');
+      setTimeout(() => node.classList.remove('node-just-changed'), 700);
+    }
     stateEl.textContent = text;
   }
 
@@ -90,12 +99,57 @@
       $('stat-' + prefix + '-uptime').textContent = '-';
       $('stat-' + prefix + '-requests').textContent = '-';
     }
+
+    const history = latencyHistory[prefix];
+    history.push(probeResult.reachable ? Math.round(probeResult.ms) : null);
+    while (history.length > SPARK_LEN) history.shift();
+    $('stat-' + prefix + '-latency').textContent = probeResult.reachable ? Math.round(probeResult.ms) + ' ms' : '-';
+    renderSpark(prefix, history, zoneState);
     return g;
   }
 
+  function renderSpark(prefix, history, zoneState) {
+    const line = $('spark-' + prefix + '-line');
+    const values = history.filter(v => v != null);
+    $('stats-' + prefix).classList.toggle('spark-bad', zoneState !== 'ok');
+    if (values.length < 2) { line.setAttribute('points', ''); return; }
+    const max = Math.max(...values, 1);
+    const min = Math.min(...values);
+    const span = Math.max(max - min, 1);
+    const step = 120 / (SPARK_LEN - 1);
+    const points = history.map((v, i) => {
+      if (v == null) return null;
+      const y = 25 - ((v - min) / span) * 21;
+      return `${(i * step).toFixed(1)},${y.toFixed(1)}`;
+    }).filter(Boolean).join(' ');
+    line.setAttribute('points', points);
+  }
+
+  function spawnDot(pathId) {
+    const path = $(pathId);
+    if (!path) return;
+    const length = path.getTotalLength();
+    const dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('r', '4');
+    dot.setAttribute('class', 'dot');
+    $('dots').append(dot);
+    const started = performance.now();
+    const DURATION = 850;
+    const step = now => {
+      const t = (now - started) / DURATION;
+      if (t >= 1 || !dot.isConnected) { dot.remove(); return; }
+      const point = path.getPointAtLength(t * length);
+      dot.setAttribute('cx', point.x.toFixed(1));
+      dot.setAttribute('cy', point.y.toFixed(1));
+      dot.setAttribute('opacity', t < 0.85 ? '1' : String((1 - t) / 0.15));
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
   function render() {
-    renderZone('a', state.a, state.aProbe || { reachable: false });
-    renderZone('b', state.b, state.bProbe || { reachable: false });
+    renderZone('a', state.a, state.aProbe || { reachable: false, ms: 0 });
+    renderZone('b', state.b, state.bProbe || { reachable: false, ms: 0 });
 
     const albState = $('alb-state');
     const albNode = $('node-alb');
@@ -112,6 +166,12 @@
     $('flow-alb-a').classList.toggle('flow-on', state.alb === 'ok' && state.serving === zoneName('a'));
     $('flow-alb-b').classList.toggle('flow-on', state.alb === 'ok' && state.serving === zoneName('b'));
 
+    if (state.alb === 'ok') {
+      spawnDot('flow-client-alb');
+      if (state.serving === zoneName('a')) spawnDot('flow-alb-a');
+      if (state.serving === zoneName('b')) spawnDot('flow-alb-b');
+    }
+
     $('poll-state').textContent = 'Live - updated ' + new Date().toLocaleTimeString([], { hour12: false });
   }
 
@@ -120,6 +180,12 @@
   }
 
   let lastServingLogged = null;
+
+  function flashPath(pathId) {
+    const path = $(pathId);
+    path.classList.add('flow-flash');
+    setTimeout(() => path.classList.remove('flow-flash'), 2500);
+  }
 
   function noteTransitions(prev) {
     if (prev.a !== state.a) {
@@ -132,12 +198,16 @@
       if (state.b === 'ok' && prev.b !== 'unknown') log('Zone B is healthy again', 'log-ok');
       if (state.b === 'down') log('Zone B unreachable', 'log-bad');
     }
-    // Round robin flips the answering zone every request, so only log the
-    // serving zone once it has been stable across two consecutive polls -
-    // that is the failover signal worth seeing.
+    // Round robin flips the answering zone every request, so only announce
+    // the serving zone once it has been stable across two consecutive polls
+    // - that is the failover signal worth seeing, and it gets the flash.
     if (state.serving && state.serving === prev.serving && state.serving !== lastServingLogged) {
+      const isFailover = lastServingLogged !== null;
       lastServingLogged = state.serving;
       log(`Load balancer is routing to ${state.serving}`, 'log-ok');
+      if (isFailover) {
+        flashPath(state.serving === zoneName('a') ? 'flow-alb-a' : 'flow-alb-b');
+      }
     }
     if (prev.alb !== state.alb && state.alb !== 'ok') log('Load balancer unreachable', 'log-bad');
   }

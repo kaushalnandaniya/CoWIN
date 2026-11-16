@@ -325,3 +325,61 @@ button.danger:disabled, button.secondary:disabled, button.primary:disabled {
     line-height:36px;
   }
 }
+
+/* === Motion and failover emphasis === */
+
+.dot {
+  fill:var(--action);
+}
+
+.flow.flow-flash {
+  stroke:var(--action-hover);
+  stroke-width:4;
+  stroke-dasharray:none;
+  animation:flow-pulse 0.8s ease-in-out 3;
+}
+
+@keyframes flow-pulse {
+  50% { stroke-width:7; }
+}
+
+.node rect, .node .node-state {
+  transition:fill 0.4s, stroke 0.4s;
+}
+
+.node.node-just-changed rect {
+  animation:node-pop 0.6s ease-out 1;
+}
+
+@keyframes node-pop {
+  30% { stroke-width:4; }
+}
+
+.spark {
+  width:100%;
+  height:28px;
+  margin-top:10px;
+  display:block;
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:6px;
+}
+
+.spark polyline {
+  fill:none;
+  stroke:var(--action);
+  stroke-width:1.5;
+}
+
+.zone-stat.spark-bad polyline {
+  stroke:var(--error-text);
+}
+
+.event-log li {
+  animation:log-in 0.25s ease-out 1;
+}
+
+@keyframes log-in {
+  from { opacity:0; transform:translateY(-4px); }
+  to { opacity:1; transform:none; }
+}

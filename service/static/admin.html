@@ -63,6 +63,7 @@
             <text id="zone-b-name" class="node-sub" x="676" y="340">ap-south-1b</text>
             <text id="zone-b-state" class="node-state" x="676" y="362">checking</text>
           </g>
+          <g id="dots" aria-hidden="true"></g>
         </svg>
         <div class="zone-stats">
           <div class="zone-stat" id="stats-a">
@@ -72,7 +73,11 @@
               <div><dt>Instance</dt><dd id="stat-a-instance" class="mono">-</dd></div>
               <div><dt>Uptime</dt><dd id="stat-a-uptime">-</dd></div>
               <div><dt>Requests served</dt><dd id="stat-a-requests">-</dd></div>
+              <div><dt>Health latency</dt><dd id="stat-a-latency">-</dd></div>
             </dl>
+            <svg class="spark" id="spark-a" viewBox="0 0 120 28" preserveAspectRatio="none" role="img" aria-label="Zone A recent health-check latency">
+              <polyline id="spark-a-line" points=""></polyline>
+            </svg>
           </div>
           <div class="zone-stat" id="stats-b">
             <h3>Zone B</h3>
@@ -81,7 +86,11 @@
               <div><dt>Instance</dt><dd id="stat-b-instance" class="mono">-</dd></div>
               <div><dt>Uptime</dt><dd id="stat-b-uptime">-</dd></div>
               <div><dt>Requests served</dt><dd id="stat-b-requests">-</dd></div>
+              <div><dt>Health latency</dt><dd id="stat-b-latency">-</dd></div>
             </dl>
+            <svg class="spark" id="spark-b" viewBox="0 0 120 28" preserveAspectRatio="none" role="img" aria-label="Zone B recent health-check latency">
+              <polyline id="spark-b-line" points=""></polyline>
+            </svg>
           </div>
         </div>
       </section>
