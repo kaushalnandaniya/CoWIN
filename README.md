@@ -92,6 +92,15 @@ timeout, while the CloudFormation target group probes every 5s with a 2s timeout
 They characterize the failover logic, not AWS network behavior; the 2.1s RTO is
 measured against the simulator's 1s probing, not the template's 5s interval.
 
+A real AWS run against the CloudFormation deployment (Zone A instance stopped
+and restarted through the ALB, 2026-11-16) is committed under
+[`evidence/aws-run-2026-11-16/`](evidence/aws-run-2026-11-16/): 323/333 requests
+successful (10 client-visible errors during the ~10s detection window), traffic
+served 100% by Zone B while Zone A was down, and both targets healthy again
+~40s after the restart. The raw request samples, AWS API timeline and result
+aggregates are included so the report's failover tables are independently
+checkable.
+
 ## Cost and scaling
 
 Full analysis in [`docs/week-3/COST_AND_SCALING_ANALYSIS.md`](docs/week-3/COST_AND_SCALING_ANALYSIS.md):
