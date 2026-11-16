@@ -262,6 +262,7 @@ Resources:
           BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
           fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
           fetch "$BASE_URL/app.py" /opt/cowin/app.py
+          fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
           fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
           for asset in index.html styles.css app.js; do
             fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
@@ -330,6 +331,7 @@ Resources:
           BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
           fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
           fetch "$BASE_URL/app.py" /opt/cowin/app.py
+          fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
           fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
           for asset in index.html styles.css app.js; do
             fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"

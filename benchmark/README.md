@@ -1,6 +1,6 @@
 # Failover benchmarking and evidence
 
-Darshil's service/testing contribution builds on the existing API, simulator,
+The benchmark and evidence tooling builds on the existing API, simulator,
 benchmark and test suites. Python 3 standard library only; curl and bash are
 needed by the local launcher. No AWS SDK or cloud account is needed locally.
 
@@ -27,7 +27,7 @@ putting the key in command-line arguments or result files.
 ## AWS client sampling (no resource changes)
 
 First arrange the deployment, budget, stop/start permission, screen recording,
-and target-health capture with the infrastructure lead. This client never calls
+and target-health capture with the AWS deployment owner. This client never calls
 AWS APIs and automatic injection is limited to loopback simulator addresses.
 
 ```bash

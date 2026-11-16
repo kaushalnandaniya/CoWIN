@@ -1,13 +1,14 @@
 # Vaccination Center Lookup Service
 ## IT457 Course Project Component
 
-**Assigned Responsibility:** **Darshil Gandhi** (Student ID: `202301056`) — *Service Implementation Lead*  
-**Integration Contact:** **Kaushal Nandaniya** (Student ID: `202303036`) — *AWS Infrastructure Lead*  
+**Owner:** **Jeetrajsinh Gohil** (Student ID: `202303017`) - backend and frontend  
+**Observability and data layer:** **Kaushal Nandaniya** (Student ID: `202303036`)  
+**Deployment contact:** **Darshil Gandhi** (Student ID: `202301056`) - AWS infrastructure  
 
 ---
 
 ### Description
-This directory contains the lightweight lookup microservice specified in the Week 2 Progress Report (Section 3). It runs on port `8080` on the EC2 instances provisioned by Kaushal's CloudFormation template.
+This directory contains the lightweight lookup microservice specified in the Week 2 Progress Report (Section 3). It runs on port `8080` on the EC2 instances provisioned by the CloudFormation template.
 
 It is zero-dependency (Python 3 standard library only), so it deploys on a
 plain EC2 instance with no build step. Centers are served from a SQLite
@@ -56,7 +57,7 @@ with the required `COWIN_API_KEY` and commented examples).
 
 On each EC2 node, the existing service package needs `app.py`,
 `centers_data.json`, Python 3 and the systemd unit. Use the CloudFormation
-UserData managed by the infrastructure lead rather than installing a competing
+UserData in `infrastructure/` rather than installing a competing
 second unit. Configuration and the SQLite database path must be writable by the
 service user. Inspect `systemctl status cowin` and `journalctl -u cowin` on that
 node; the standalone reference unit uses the name `cowin-lookup` instead.
@@ -109,7 +110,7 @@ assets through the ALB listener to the same target group as the API. The public
 frontend URL is the ALB address followed by `/ui/`.
 
 The CloudFormation template embeds no application copies: each node fetches
-`app.py`, `centers_data.json` and the three static assets from the repository
+`app.py`, `pages.py`, `centers_data.json` and the three static assets from the repository
 at the `AppRepoRef` parameter (a commit SHA, pinned by `deploy_aws.sh` to the
 checked-out HEAD) at first boot. Deploying an updated frontend or service is
 therefore a fresh stack deploy at the new ref; running stacks do not pick up
