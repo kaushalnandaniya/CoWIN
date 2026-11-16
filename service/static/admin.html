@@ -106,8 +106,12 @@
           <button id="btn-stop" class="danger" type="button">Stop Zone A</button>
           <button id="btn-recover" class="secondary" type="button">Recover Zone A</button>
         </div>
+        <div class="control-buttons">
+          <button id="btn-stop-b" class="danger" type="button">Stop Zone B</button>
+          <button id="btn-recover-b" class="secondary" type="button">Recover Zone B</button>
+        </div>
         <p id="control-result" class="control-result" role="status"></p>
-        <p class="field-hint">On the AWS deployment the load balancer answers /simulate/* with 403. Use this panel against the local simulator topology.</p>
+        <p class="field-hint">Controls go straight to each node; the ALB denies /simulate/* with 403. Load this panel through the node A SSH tunnel at http://localhost:8081/admin/. Forward ALB port 80 to localhost:8080 too, and node B port 8080 to localhost:8082 (full commands in service/README.md). Check all endpoint fields before typing the key: node control URLs must be your loopback forwards. The default timer recovers an accepted failure after about 2 minutes; repeated Stop on that node is refused without replacing the timer. Drill one zone at a time. Peer checks are not an AWS-wide availability guarantee.</p>
         <h3 class="log-title">Event log</h3>
         <ul id="event-log" class="event-log"></ul>
       </aside>

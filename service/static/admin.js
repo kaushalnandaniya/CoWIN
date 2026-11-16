@@ -235,37 +235,50 @@
     render();
   }
 
-  async function control(path, label) {
+  async function control(zoneLetter, action, label) {
     const result = $('control-result');
     result.className = 'control-result';
     result.textContent = label + '...';
-    for (const id of ['btn-stop', 'btn-recover']) $(id).disabled = true;
+    for (const id of ['btn-stop', 'btn-recover', 'btn-stop-b', 'btn-recover-b']) $(id).disabled = true;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
+      // Direct-to-node control: each zone's command goes to that zone's
+      // own endpoint (locally the node itself, on AWS an SSH tunnel
+      // forward - the ALB denies /simulate/* with 403 by design), so the
+      // drill can only reach the intended zone. The zone-pinned path
+      // lets the node double-check the letter before acting.
       const headers = {};
       if (apiKey) headers['X-API-Key'] = apiKey;
-      const response = await fetch(cfg.a + path, { method: 'POST', headers, signal: controller.signal });
+      const nodeBase = zoneLetter === 'a' ? cfg.a : cfg.b;
+      const response = await fetch(`${nodeBase}/simulate/zone-${zoneLetter}/${action}`, { method: 'POST', headers, signal: controller.signal });
       if (response.ok) {
         result.textContent = label + ': command accepted.';
         result.classList.add('ok');
-        log(label + ': command accepted by Zone A', 'log-ok');
+        log(label + ': command accepted by Zone ' + zoneLetter.toUpperCase(), 'log-ok');
+        if (action === 'fail') log('Failure accepted; check the configured auto-recover window (default 120 seconds)', 'log-ok');
       } else if (response.status === 401) {
         result.textContent = label + ': rejected - the API key is missing or wrong.';
         result.classList.add('err');
         log(label + ': 401 unauthorized (check the API key)', 'log-bad');
+      } else if (response.status === 409) {
+        let detail = 'conflict (check the zone, active drill, and peer health)';
+        try { detail = (await response.json()).message || detail; } catch (error) { /* keep fallback */ }
+        result.textContent = label + ': refused - ' + detail;
+        result.classList.add('err');
+        log(label + ': 409 refused - ' + detail, 'log-bad');
       } else {
         result.textContent = `${label}: HTTP ${response.status}.`;
         result.classList.add('err');
         log(`${label}: HTTP ${response.status}`, 'log-bad');
       }
     } catch (error) {
-      result.textContent = label + ': could not reach the Zone A node.';
+      result.textContent = label + ': could not reach the zone ' + zoneLetter.toUpperCase() + ' node (is the SSH tunnel up?).';
       result.classList.add('err');
-      log(label + ': Zone A node unreachable', 'log-bad');
+      log(label + ': zone ' + zoneLetter.toUpperCase() + ' node unreachable', 'log-bad');
     } finally {
       clearTimeout(timeout);
-      for (const id of ['btn-stop', 'btn-recover']) $(id).disabled = false;
+      for (const id of ['btn-stop', 'btn-recover', 'btn-stop-b', 'btn-recover-b']) $(id).disabled = false;
       poll();
     }
   }
@@ -287,8 +300,10 @@
   $('cfg-b').value = cfg.b;
   $('cfg-apply').addEventListener('click', applyConfig);
   $('api-key').addEventListener('input', event => { apiKey = event.target.value; });
-  $('btn-stop').addEventListener('click', () => control('/simulate/fail', 'Stop Zone A'));
-  $('btn-recover').addEventListener('click', () => control('/simulate/recover', 'Recover Zone A'));
+  $('btn-stop').addEventListener('click', () => control('a', 'fail', 'Stop Zone A'));
+  $('btn-recover').addEventListener('click', () => control('a', 'recover', 'Recover Zone A'));
+  $('btn-stop-b').addEventListener('click', () => control('b', 'fail', 'Stop Zone B'));
+  $('btn-recover-b').addEventListener('click', () => control('b', 'recover', 'Recover Zone B'));
 
   poll();
   timer = setInterval(poll, POLL_MS);

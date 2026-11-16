@@ -32,6 +32,7 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
                   Application Load Balancer
                   (internet-facing, port 80)
                   /simulate/* -> 403 at the edge
+                  (operator drills reach the nodes over SSH tunnels)
                             |
                 Target Group: GET /health every 5s
                 (timeout 2s, healthy/unhealthy thresholds 2/2)
@@ -46,7 +47,7 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
 | Network isolation | Custom VPC (`10.0.0.0/16`) with one public subnet per zone. Instances accept port 8080 only from the load balancer's security group. |
 | Health-gated routing | The target group removes a node after 2 consecutive failed probes and restores it after 2 successes. |
 | Stateless nodes | Every node serves the same dataset, so failover and recovery lose no state. RPO is zero by construction. |
-| Failure injection | `/simulate/fail` and `/simulate/recover` are protected by an API key and denied at the load balancer listener. Real drills stop and start the Zone A instance instead. |
+| Failure injection | The ALB denies every `/simulate/*` with 403. An operator drill tunnels SSH to the intended node (`ssh -L`), loads the `/admin` console through the tunnel, and calls the node's zone-pinned path directly, so the command can only reach that zone and the API key never crosses public HTTP. The key itself is set over SSH after boot, never stored in UserData. The node requires the key, rejects a call for the wrong zone, refuses a second failure while its peer is unhealthy - even under simultaneous commands, where intent-first marking makes the loser back off with a 409 - and auto-recovers a simulated failure after about two minutes; a repeated fail during an active one is refused so the window cannot be extended. |
 | Self-healing | Each node runs the service under systemd with `Restart=always`. |
 
 ## Service
@@ -60,11 +61,11 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
 | `GET /metrics` | Uptime, zone health, per-endpoint and per-status counters, store and rate-limit counters. |
 | `GET /info` | Service information and endpoint directory. |
 | `GET /ui/` | Responsive lookup frontend. |
-| `/simulate/fail`, `/simulate/recover` | Force the health check to fail or recover. Requires `X-API-Key` when `COWIN_API_KEY` is set. |
+| `/simulate/<action>` | Force the health check to fail or recover. Reached directly on the node (on AWS, over an SSH tunnel) via the zone-pinned path `/simulate/zone-<a|b>/<action>`; requires `X-API-Key` when `COWIN_API_KEY` is set. |
 
 Browsers that send `Accept: text/html` receive styled views of the API routes. All other clients receive JSON. Every response carries `X-Served-By-Zone` and `X-Instance-Id` headers, so traffic distribution across zones is directly observable.
 
-Configuration is by environment variable or CLI flag: `PORT`, `AWS_AZ`, `AWS_INSTANCE_ID`, `CENTERS_DATA_FILE`, `CENTERS_DB_FILE`, `COWIN_API_KEY`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST` and `LOG_LEVEL`. The full table is in [`service/README.md`](service/README.md).
+Configuration is by environment variable or CLI flag: `PORT`, `AWS_AZ`, `AWS_INSTANCE_ID`, `CENTERS_DATA_FILE`, `CENTERS_DB_FILE`, `COWIN_API_KEY`, `COWIN_PEER_URL`, `COWIN_SIM_AUTO_RECOVER_SECONDS`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST` and `LOG_LEVEL`. The full table is in [`service/README.md`](service/README.md).
 
 The frontend and sample data are a course demo, not the official CoWIN portal. Dates and capacity values come from a static dataset and are not live availability.
 

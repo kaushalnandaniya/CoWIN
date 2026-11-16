@@ -20,11 +20,14 @@ or directly:
 
 import json
 import os
+import socket
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -501,6 +504,481 @@ class TestTightenedValidation(LiveServerTestCase):
             self.assertEqual(status, 405, method)
             self.assertEqual(body["error"], "Method Not Allowed", method)
             self.assertEqual(headers.get("Allow"), "GET, POST, OPTIONS", method)
+
+
+class TestZonePinnedSimulate(LiveServerTestCase):
+    """Zone-qualified /simulate/zone-<letter>/* commands.
+
+    The panel sends these directly through per-node tunnels; the node
+    double-checks the letter so a misrouted command can never flip the
+    wrong zone. The test zone is test-zone-1a, i.e. letter 'a'.
+    """
+
+    def tearDown(self):
+        # Never leak a simulated failure into the next test.
+        self.request("/simulate/recover")
+
+    def test_matching_zone_command_runs(self):
+        status, _, body = self.request("/simulate/zone-a/fail", method="POST")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "unhealthy")
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 500)
+        status, _, body = self.request("/simulate/zone-a/recover", method="POST")
+        self.assertEqual(status, 200)
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 200)
+
+    def test_wrong_zone_command_is_refused_with_409(self):
+        status, _, body = self.request("/simulate/zone-b/fail", method="POST")
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "Conflict")
+        # State untouched: the node stays healthy.
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 200)
+
+    def test_fail_response_reports_auto_recover_bound(self):
+        status, _, body = self.request("/simulate/zone-a/fail", method="POST")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["auto_recover_in_seconds"],
+                         app.DEFAULT_SIM_AUTO_RECOVER_SECONDS)
+
+
+class TestSimulateAuthOnZonePaths(LiveServerTestCase):
+    """Zone-qualified paths are protected exactly like the plain ones."""
+
+    server_kwargs = {"api_key": TEST_API_KEY}
+
+    def tearDown(self):
+        self.request("/simulate/recover",
+                     headers={app.AUTH_HEADER: TEST_API_KEY})
+
+    def test_zone_path_requires_key(self):
+        status, _, _ = self.request("/simulate/zone-a/fail", method="POST")
+        self.assertEqual(status, 401)
+
+    def test_zone_path_with_key_runs(self):
+        status, _, _ = self.request("/simulate/zone-a/fail", method="POST",
+                                    headers={app.AUTH_HEADER: TEST_API_KEY})
+        self.assertEqual(status, 200)
+
+    def test_rejected_key_is_never_logged(self):
+        secret = "never-logged-secret"
+        with self.assertLogs("cowin-lookup", level="WARNING") as captured:
+            status, _, _ = self.request("/simulate/zone-a/fail", method="POST",
+                                        headers={app.AUTH_HEADER: secret})
+        self.assertEqual(status, 401)
+        self.assertNotIn(secret, "\n".join(captured.output))
+
+
+class TestSimulateAutoRecover(unittest.TestCase):
+    """A simulated failure is bounded: the node restores its own health
+    after the configured delay even if /recover never comes, and a process
+    restart always comes back healthy."""
+
+    def test_auto_recovers_after_configured_delay(self):
+        httpd, thread, base = start_test_server(auto_recover_seconds=0.3)
+        try:
+            req = urllib.request.Request(base + "/simulate/fail", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            # Failing right after the command...
+            req = urllib.request.Request(base + "/health")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 500)
+            # ...and healthy again once the timer fires, untouched.
+            time.sleep(0.8)
+            with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            stop_test_server(httpd, thread)
+
+    def test_repeat_fail_does_not_rearm_the_timer(self):
+        # Hard bound: a fail while a simulated failure is already active
+        # is refused (409) and does NOT extend the window - otherwise a
+        # key holder could keep the zone degraded indefinitely.
+        httpd, thread, base = start_test_server(auto_recover_seconds=0.6)
+        try:
+            req = urllib.request.Request(base + "/simulate/fail", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            time.sleep(0.3)  # half the window passes
+            req = urllib.request.Request(base + "/simulate/fail", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 409)
+            # If the re-fail had re-armed the timer, recovery would come
+            # at ~0.9s; the original deadline (~0.6s) must win.
+            time.sleep(0.5)
+            with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            stop_test_server(httpd, thread)
+
+    def test_manual_recover_cancels_pending_auto_recover(self):
+        httpd, thread, base = start_test_server(auto_recover_seconds=30)
+        try:
+            for path in ("/simulate/fail", "/simulate/recover"):
+                req = urllib.request.Request(base + path, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 200)
+            self.assertIsNone(httpd.auto_recover_timer)
+        finally:
+            stop_test_server(httpd, thread)
+
+    def test_restart_comes_back_healthy(self):
+        # A simulated failure is process-local runtime state: if the node
+        # restarts mid-drill (systemd Restart=always), it serves healthy
+        # again instead of being stuck failing.
+        httpd, thread, base = start_test_server()
+        req = urllib.request.Request(base + "/simulate/fail", method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        port = httpd.server_address[1]
+        stop_test_server(httpd, thread)
+
+        httpd2, thread2, base2 = start_test_server()
+        try:
+            with urllib.request.urlopen(base2 + "/health", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            stop_test_server(httpd2, thread2)
+        self.assertNotEqual(port, 0)  # first server really was running
+
+
+class TestSimulatePeerInterlock(unittest.TestCase):
+    """The cross-zone safety invariant: with a peer configured, a node
+    refuses /simulate/fail while the other zone is unhealthy, so at
+    most one zone is in simulated failure at a time."""
+
+    def setUp(self):
+        self.a = start_test_server(zone="test-zone-1a")
+        self.b = start_test_server(zone="test-zone-1b")
+        # Wire the peer interlock both ways (config is read per request).
+        self.a[0].config.peer_url = self.b[2]
+        self.b[0].config.peer_url = self.a[2]
+
+    def tearDown(self):
+        for server in (self.a, self.b):
+            if server is None:
+                continue
+            req = urllib.request.Request(server[2] + "/simulate/recover",
+                                         method="POST")
+            try:
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+            stop_test_server(server[0], server[1])
+
+    def _post(self, base, path):
+        req = urllib.request.Request(base + path, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_refuses_to_fail_second_zone(self):
+        self.assertEqual(self._post(self.a[2], "/simulate/zone-a/fail"), 200)
+        # Peer A is now failing: B must refuse a second degradation.
+        self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 409)
+        # B stayed healthy.
+        with urllib.request.urlopen(self.b[2] + "/health", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        # After A recovers, a drill on B is allowed again.
+        self.assertEqual(self._post(self.a[2], "/simulate/zone-a/recover"), 200)
+        self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 200)
+
+    def test_unreachable_peer_also_refuses(self):
+        stop_test_server(self.a[0], self.a[1])
+        self.a = None
+        self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 409)
+
+
+class TestSimulateFailRace(unittest.TestCase):
+    """Concurrency regression: simultaneous fail commands on both zones.
+
+    The peer-health interlock used to be check-then-set, so two fail
+    requests fired at the same moment both saw a healthy peer and both
+    failed their zone - the whole site went dark. The fix marks the
+    node's own failure intent before consulting the peer and rolls
+    back when the peer is already failing, so under ANY interleaving
+    the losing command gets a 409. In a dead heat BOTH commands may be
+    refused (neither zone goes down); the operator retries one.
+    """
+
+    ROUNDS = 25
+
+    def setUp(self):
+        self.a = start_test_server(zone="test-zone-1a")
+        self.b = start_test_server(zone="test-zone-1b")
+        self.a[0].config.peer_url = self.b[2]
+        self.b[0].config.peer_url = self.a[2]
+
+    def tearDown(self):
+        for server in (self.a, self.b):
+            req = urllib.request.Request(server[2] + "/simulate/recover",
+                                         method="POST")
+            try:
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+            stop_test_server(server[0], server[1])
+
+    def _post(self, base, path, results, errors, slot, barrier):
+        try:
+            barrier.wait(timeout=5)
+            req = urllib.request.Request(base + path, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    results[slot] = resp.status
+            except urllib.error.HTTPError as e:
+                results[slot] = e.code
+        except Exception as error:
+            errors[slot] = repr(error)
+
+    def _health(self, base):
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_simultaneous_fail_never_takes_both_zones_down(self):
+        for _ in range(self.ROUNDS):
+            results = [None, None]
+            errors = [None, None]
+            barrier = threading.Barrier(2)
+            threads = [
+                threading.Thread(target=self._post,
+                                 args=(self.a[2], "/simulate/fail",
+                                       results, errors, 0, barrier)),
+                threading.Thread(target=self._post,
+                                 args=(self.b[2], "/simulate/fail",
+                                       results, errors, 1, barrier)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [None, None])
+            self.assertTrue(all(status in (200, 409) for status in results), results)
+            # Never both accepted...
+            self.assertNotEqual(results, [200, 200],
+                                "both zones accepted simultaneous fail")
+            # ...and never both left failing afterwards.
+            states = (self._health(self.a[2]), self._health(self.b[2]))
+            self.assertNotEqual(states, (500, 500),
+                                "both zones left failing after the race")
+            # Reset for the next round.
+            for base in (self.a[2], self.b[2]):
+                req = urllib.request.Request(base + "/simulate/recover",
+                                             method="POST")
+                try:
+                    urllib.request.urlopen(req, timeout=5)
+                except Exception:
+                    pass
+
+    def test_staggered_fail_second_gets_409(self):
+        # A wins cleanly; a slightly later B must be refused, not race in.
+        self.assertEqual(self._post_sync(self.a[2], "/simulate/fail"), 200)
+        self.assertEqual(self._post_sync(self.b[2], "/simulate/fail"), 409)
+        self.assertEqual(self._health(self.a[2]), 500)
+        self.assertEqual(self._health(self.b[2]), 200)
+
+    def _post_sync(self, base, path):
+        req = urllib.request.Request(base + path, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+
+class TestSimulateSynchronization(unittest.TestCase):
+    """Forced interleavings, separate from the probabilistic two-node race."""
+
+    def _post(self, base, action="fail"):
+        req = urllib.request.Request(base + "/simulate/" + action, method="POST",
+                                     headers={app.AUTH_HEADER: TEST_API_KEY})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            error.read()
+            return error.code
+
+    def test_disconnected_refusal_rolls_back_before_response(self):
+        a = start_test_server(api_key=TEST_API_KEY, auto_recover_seconds=30)
+        b = start_test_server(api_key=TEST_API_KEY, auto_recover_seconds=.1)
+        a[0].config.peer_url = b[2]
+        b[0].config.peer_url = a[2]
+        entered, release = threading.Event(), threading.Event()
+        original = app.CoWINLookupHandler._peer_allows_failure
+
+        def delayed_probe(handler):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release peer probe")
+            return original(handler)
+
+        client = None
+        try:
+            self.assertEqual(self._post(a[2]), 200)
+            with patch.object(app.CoWINLookupHandler, "_peer_allows_failure", delayed_probe):
+                client = socket.create_connection(b[0].server_address, timeout=5)
+                client.sendall(("POST /simulate/fail HTTP/1.1\r\nHost: localhost\r\n"
+                                "X-API-Key: " + TEST_API_KEY +
+                                "\r\nContent-Length: 0\r\n\r\n").encode())
+                self.assertTrue(entered.wait(5))
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                  struct.pack("ii", 1, 0))
+                client.close()
+                release.set()
+                # The pending request owns this lock until decision cleanup.
+                with b[0].simulate_lock:
+                    self.assertFalse(b[0].state.is_unhealthy())
+                    self.assertIsNone(b[0].auto_recover_timer)
+            self.assertTrue(a[0].state.is_unhealthy())
+            with urllib.request.urlopen(b[2] + "/health", timeout=5) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            release.set()
+            if client is not None:
+                client.close()
+            for server, thread, _ in (a, b):
+                stop_test_server(server, thread)
+
+    def test_two_local_requests_cannot_both_accept_or_rearm(self):
+        class ContendedLock:
+            # Both handlers must arrive before either enters the lock.
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.barrier = threading.Barrier(2)
+                self.entries = 0
+                self.meta = threading.Lock()
+
+            def __enter__(self):
+                with self.meta:
+                    self.entries += 1
+                    entry = self.entries
+                if entry <= 2:
+                    self.barrier.wait(timeout=5)
+                self.lock.acquire()
+
+            def __exit__(self, *args):
+                self.lock.release()
+
+        server, thread, base = start_test_server(api_key=TEST_API_KEY,
+                                                auto_recover_seconds=30)
+        server.simulate_lock = ContendedLock()
+        results, errors = [], []
+        def worker():
+            try:
+                results.append(self._post(base))
+            except Exception as error:
+                errors.append(repr(error))
+        try:
+            workers = [threading.Thread(target=worker) for _ in range(2)]
+            for worker_thread in workers:
+                worker_thread.start()
+            for worker_thread in workers:
+                worker_thread.join(timeout=10)
+                self.assertFalse(worker_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(sorted(results), [200, 409])
+            timer = server.auto_recover_timer
+            self.assertIsNotNone(timer)
+            self.assertEqual(self._post(base), 409)
+            self.assertIs(server.auto_recover_timer, timer)
+        finally:
+            stop_test_server(server, thread)
+
+    def test_recover_waits_for_pending_fail_decision(self):
+        server, thread, base = start_test_server(api_key=TEST_API_KEY)
+        entered, release, recovered = (threading.Event() for _ in range(3))
+        results, errors = {}, []
+        def delayed_probe(handler):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release probe")
+            return True
+        def worker(action):
+            try:
+                results[action] = self._post(base, action)
+            except Exception as error:
+                errors.append(repr(error))
+            finally:
+                if action == "recover":
+                    recovered.set()
+        fail = threading.Thread(target=worker, args=("fail",))
+        recover = threading.Thread(target=worker, args=("recover",))
+        try:
+            with patch.object(app.CoWINLookupHandler, "_peer_allows_failure", delayed_probe):
+                fail.start()
+                self.assertTrue(entered.wait(5))
+                recover.start()
+                self.assertFalse(recovered.wait(.1))
+                release.set()
+                for worker_thread in (fail, recover):
+                    worker_thread.join(timeout=10)
+                    self.assertFalse(worker_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(results, {"fail": 200, "recover": 200})
+            self.assertFalse(server.state.is_unhealthy())
+            self.assertIsNone(server.auto_recover_timer)
+        finally:
+            release.set()
+            for worker_thread in (fail, recover):
+                if worker_thread.ident is not None:
+                    worker_thread.join(timeout=10)
+            stop_test_server(server, thread)
+
+    def test_stale_timer_cannot_recover_a_new_drill(self):
+        server, thread, base = start_test_server(api_key=TEST_API_KEY,
+                                                auto_recover_seconds=30)
+        try:
+            self.assertEqual(self._post(base), 200)
+            old_timer = server.auto_recover_timer
+            self.assertEqual(self._post(base, "recover"), 200)
+            self.assertEqual(self._post(base), 200)
+            current_timer = server.auto_recover_timer
+            # Simulate a cancelled callback already dispatched but stalled.
+            old_timer.function()
+            self.assertTrue(server.state.is_unhealthy())
+            self.assertIs(server.auto_recover_timer, current_timer)
+            current_timer.function()
+            self.assertFalse(server.state.is_unhealthy())
+            self.assertIsNone(server.auto_recover_timer)
+            current_timer.cancel()
+        finally:
+            stop_test_server(server, thread)
+
+    def test_probe_exception_does_not_leave_intent_or_timer(self):
+        server, thread, base = start_test_server(api_key=TEST_API_KEY)
+        try:
+            with patch.object(app.CoWINLookupHandler, "_peer_allows_failure",
+                              side_effect=RuntimeError("injected probe failure")):
+                self.assertEqual(self._post(base), 500)
+            self.assertFalse(server.state.is_unhealthy())
+            self.assertIsNone(server.auto_recover_timer)
+        finally:
+            stop_test_server(server, thread)
+
+
+class TestLogicalZoneLetter(LiveServerTestCase):
+    server_kwargs = {"zone": "ap-south-1c", "zone_letter": "b"}
+
+    def test_logical_b_in_physical_c(self):
+        try:
+            status, _, body = self.request("/simulate/zone-b/fail", method="POST")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["zone"], "ap-south-1c")
+            status, _, _ = self.request("/simulate/zone-a/recover", method="POST")
+            self.assertEqual(status, 409)
+        finally:
+            self.request("/simulate/zone-b/recover", method="POST")
 
 
 if __name__ == "__main__":

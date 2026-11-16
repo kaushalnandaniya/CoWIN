@@ -64,6 +64,10 @@ class TestFrontend(unittest.TestCase):
                 self.assertIn('/ui/admin.js', body)
                 self.assertIn('Stop Zone A', body)
                 self.assertIn('Recover Zone A', body)
+                self.assertIn('Stop Zone B', body)
+                self.assertIn('Recover Zone B', body)
+                # The page states the one-zone-down safety rule.
+                self.assertIn('Drill one zone at a time', body)
                 # No key is baked into the page: it is typed in per session.
                 self.assertIn('id="api-key"', body)
                 self.assertIn('type="password"', body)
@@ -77,8 +81,7 @@ class TestFrontend(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('text/javascript', response.headers['Content-Type'])
             script = response.read().decode()
-            self.assertIn('/simulate/fail', script)
-            self.assertIn('/simulate/recover', script)
+            self.assertIn('/simulate/zone-', script)
             self.assertIn('X-API-Key', script)
             self.assertIn('/health', script)
 
