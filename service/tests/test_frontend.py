@@ -39,7 +39,7 @@ class TestFrontend(unittest.TestCase):
                 body = response.read().decode()
                 self.assertEqual(response.status, 200)
                 self.assertIn('text/html', response.headers['Content-Type'])
-                self.assertIn('Course demo. Not a booking service.', body)
+                self.assertIn('Sample data. Not a booking service.', body)
                 self.assertIn('role="status"', body)
                 self.assertIn('/ui/app.js', body)
                 self.assertIn('X-Served-By-Zone', response.headers)

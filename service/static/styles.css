@@ -1,4 +1,4 @@
-/* CoWIN lookup demo styles: restrained green/cream design language.
+/* CoWIN lookup styles: restrained green/cream design language.
    Sections mirror the page structure in index.html. */
 
 /* === Design tokens and base elements === */
@@ -141,7 +141,7 @@ h1 {
   margin:0 0 16px;
 }
 
-.demo-note {
+.info-note {
   max-width:760px;
   border-left:3px solid #c4d3a9;
   padding:7px 13px;
@@ -149,7 +149,7 @@ h1 {
   color:#586c5e;
 }
 
-.demo-note strong {
+.info-note strong {
   font-weight:650;
   color:#435c4b;
 }
@@ -637,7 +637,7 @@ footer {
     font-size:10px;
     letter-spacing:1px;
   }
-  .demo-note {
+  .info-note {
     font-size:12.5px;
   }
   .search-panel {

@@ -26,10 +26,10 @@
       const row = text('div', '', 'session');
       const top = text('div', '', 'session-top');
       top.append(text('span', session.vaccine || 'Vaccine not listed'), text('span', `${session.min_age_limit ?? '?'}+ years`));
-      row.append(top, text('span', `${session.date || 'Date not listed'} · Sample capacity: ${session.available_capacity ?? 'Not listed'}`, 'session-detail'));
+      row.append(top, text('span', `${session.date || 'Date not listed'} · Available capacity: ${session.available_capacity ?? 'Not listed'}`, 'session-detail'));
       sessions.append(row);
     }
-    if (!sessions.childElementCount) sessions.append(text('p', 'No sample sessions listed.', 'session-detail'));
+    if (!sessions.childElementCount) sessions.append(text('p', 'No sessions listed.', 'session-detail'));
     return card;
   }
 
@@ -48,7 +48,7 @@
     $('empty').hidden = true;
     $('centers').classList.add('is-loading');
     $('result-count').textContent = 'Searching';
-    $('status').textContent = 'Requesting sample centers from the API...';
+    $('status').textContent = 'Requesting centers from the API...';
     $('request-state').textContent = 'Lookup in progress';
     $('request-dot').style.background = '';
     $('zone').textContent = 'Waiting for response';
@@ -73,8 +73,8 @@
       $('empty').hidden = data.centers.length !== 0;
       $('result-count').textContent = `${data.centers.length} ${data.centers.length === 1 ? 'center' : 'centers'}`;
       const scope = [filters.district && `district "${filters.district}"`, filters.pincode && `pincode ${filters.pincode}`].filter(Boolean).join(' and ');
-      const found = `${data.centers.length} sample ${data.centers.length === 1 ? 'center' : 'centers'}`;
-      $('status').textContent = scope ? `${found} found for ${scope}.` : `Showing all ${data.centers.length} centers in the sample dataset.`;
+      const found = `${data.centers.length} ${data.centers.length === 1 ? 'center' : 'centers'}`;
+      $('status').textContent = scope ? `${found} found for ${scope}.` : `Showing all ${data.centers.length} centers.`;
       $('zone').textContent = data.served_by?.zone || 'Not reported';
       $('instance').textContent = data.served_by?.instance_id || 'Not reported';
       $('request-state').textContent = 'API responded';

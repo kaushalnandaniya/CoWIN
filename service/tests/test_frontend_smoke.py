@@ -2,7 +2,7 @@
 
 The HTTP tests in test_frontend.py only see strings. This suite runs the
 real page in headless Chrome against the real service and drives the key
-flows a demo depends on: initial load, district and pincode filters, the
+flows the page depends on: initial load, district and pincode filters, the
 no-match empty state, inline pincode validation, and error + retry.
 
 It needs a Chrome/Chromium binary; on machines without one it skips.
@@ -70,7 +70,7 @@ SMOKE_JS = r"""
     $('search-button').click();
     ok('district filter narrows results and announces the count',
        await waitFor(() => cards() === __DISTRICT_COUNT__) &&
-       $('status').textContent.includes('__DISTRICT_COUNT__ sample centers'));
+       $('status').textContent.includes('__DISTRICT_COUNT__ centers'));
 
     $('district').value = '';
     $('pincode').value = '__PINCODE__';
