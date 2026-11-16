@@ -15,10 +15,10 @@ A central objective of the Week 3 deliverable is to analyze **cloud cost and sca
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        INFRASTRUCTURE COST BREAKDOWN                   │
 ├───────────────────────────────┬────────────────────────────────────────┤
-│ Experimental Two-Zone PoC     │ $0.076 / hour  (~$0.61 for 8-hr demo)   │
-│ AWS Free Tier Cost            │ $0.00 / month  (100% eligible)         │
+│ Experimental Two-Zone PoC     │ $0.054 / hour  (~$0.61 for 8-hr demo)   │
+│ AWS Free Tier Cost            │ $0.00 for the 8-hr demo (see note §2)   │
 │ Production National Peak (AWS)│ ~$45,800 / month ($0.0003 / citizen)   │
-│ Sovereign Cloud (NIC MeghRaj) │ ~₹60–75 Lakhs / month (Zero Egress Fee)│
+│ Sovereign Cloud (NIC MeghRaj) │ ~₹33.5 Lakhs / month (Zero Egress Fee) │
 └───────────────────────────────┴────────────────────────────────────────┘
 ```
 
@@ -32,17 +32,19 @@ The experimental setup deployed in Week 3 consists of a 2-Availability-Zone redu
 
 | AWS Resource | Configuration / Sizing | Hourly Rate (USD) | 8-Hour Demo Cost | Monthly Run Cost (730 hrs) | Free Tier Eligibility |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **EC2 Node A (`ap-south-1a`)** | `t3.micro` (2 vCPU, 1 GiB RAM) | $0.0104 | $0.083 | $7.59 | Free (750 hrs/month) |
-| **EC2 Node B (`ap-south-1b`)** | `t3.micro` (2 vCPU, 1 GiB RAM) | $0.0104 | $0.083 | $7.59 | Free (750 hrs/month) |
-| **EBS Storage (Zone A)** | 20 GB gp3 SSD Storage | $0.0022 | $0.018 | $1.60 | Free (up to 30 GB) |
-| **EBS Storage (Zone B)** | 20 GB gp3 SSD Storage | $0.0022 | $0.018 | $1.60 | Free (up to 30 GB) |
-| **Application Load Balancer (ALB)** | 1 ALB across 2 AZs | $0.0225 | $0.180 | $16.43 | Free (750 hrs/month) |
-| **ALB Capacity Units (LCU)** | 0.8 LCU average | $0.0064 | $0.051 | $4.67 | Free (15 LCUs/month) |
-| **Data Transfer (Egress)** | ~2 GB (test requests + responses) | $0.0900 / GB | $0.180 | $0.18 | Free (up to 100 GB/mo) |
+| **EC2 Node A (`ap-south-1a`)** | `t3.micro` (2 vCPU, 1 GiB RAM) | $0.0104 | $0.083 | $7.59 | Free Tier: 750 instance-hrs/month *account-wide* |
+| **EC2 Node B (`ap-south-1b`)** | `t3.micro` (2 vCPU, 1 GiB RAM) | $0.0104 | $0.083 | $7.59 | Shares the same account-wide 750 hrs |
+| **EBS Storage (Zone A)** | 20 GB gp3 SSD Storage | $0.0022 | $0.018 | $1.60 | Free Tier: 30 GB-month *account-wide* |
+| **EBS Storage (Zone B)** | 20 GB gp3 SSD Storage | $0.0022 | $0.018 | $1.60 | Shares the same account-wide 30 GB |
+| **Application Load Balancer (ALB)** | 1 ALB across 2 AZs | $0.0225 | $0.180 | $16.43 | Free Tier: 750 ALB-hrs/month (12 mo) |
+| **ALB Capacity Units (LCU)** | 0.8 LCU average | $0.0064 | $0.051 | $4.67 | Free Tier: 15 LCUs/month (12 mo) |
+| **Data Transfer (Egress)** | ~2 GB (test requests + responses) | $0.0900 / GB | $0.180 | $0.18 | Free Tier: 100 GB/mo account-wide |
 | **VPC & Internet Gateway** | Custom VPC, 2 Subnets, Route Tables | $0.0000 | $0.000 | $0.00 | Always Free |
 | **TOTAL (Commercial Rate)** | | **$0.0541 / hr** | **$0.613** | **$39.06 / month** | **$0.00 on Free Tier** |
 
-> **Cost Optimization Key Finding:** For students or academic institutions operating within the AWS Free Tier, running this complete two-zone high-availability failover experiment costs **$0.00**. Outside the free tier, conducting an entire day of testing and video demonstration costs less than **₹55 INR ($0.65 USD)**.
+> **Free-tier accounting note (corrected):** Free-tier allowances are **account-wide, not per-resource**. The 750 EC2 instance-hours cover only *one* `t3.micro` for a full month (two always-on nodes need 1,460 hours), and the 30 GB of EBS covers only one of the two 20 GB volumes for a full month. The **8-hour demo** (16 instance-hours, ~0.4 GB-months of EBS) fits comfortably inside every allowance and costs **$0.00**; an always-on full-month deployment does not and is billed at the commercial rates above.
+
+> **Cost Optimization Key Finding:** For students or academic institutions operating within the AWS Free Tier, running this complete two-zone high-availability failover experiment as a bounded demo costs **$0.00**. Outside the free tier, conducting an entire day of testing and video demonstration costs less than **₹55 INR ($0.65 USD)**.
 
 ---
 
@@ -91,6 +93,13 @@ To fulfill the course requirement of evaluating the **national-scale cloud archi
 | **Data Persistence (SQL/NoSQL)**| **$8,500 / mo**<br>(Aurora PostgreSQL Multi-AZ) | **~₹7,00,000 / mo**<br>(PostgreSQL on dedicated SAN storage) | Aurora Multi-AZ storage provides 6-way replication across 3 AZs with automated failover in <30s. |
 | **Bandwidth / Data Egress** | **$1,800 / mo**<br>(CloudFront CDN edge offload) | **₹0.00 (Zero Tariff)**<br>(National Knowledge Network - NKN) | **Key Sovereign Advantage:** Public network peering has no egress toll on NIC MeghRaj. |
 | **TOTAL ESTIMATED TCO** | **~$45,800 / month**<br>(~₹38.5 Lakhs/month) | **~₹33,50,000 / month**<br>(~₹33.5 Lakhs/month) | **Hybrid Strategy:** Core vaults on NIC for zero egress cost + AWS burst nodes for mega-drives. |
+
+> **Headline reconciliation:** earlier drafts of this analysis quoted the
+> sovereign-cloud option as a **₹60–75 lakh/month** range. That range was a
+> pre-itemization estimate; the itemized model above totals **~₹33.5
+> lakh/month**, which supersedes it and is the figure used throughout this
+> document and the project README. Treat the earlier range as an upper bound
+> covering provisioning contingency, not as the itemized cost.
 
 ### Unit Economics per Beneficiary
 $$\text{Cost per Certified Citizen} = \frac{\text{Total Cloud Spend over 2 Years (}\approx \text{₹80 Crore)}}{\text{1.02 Billion Beneficiaries}} \approx \mathbf{\text{₹0.78 (\$0.009 USD) per Citizen}}$$
