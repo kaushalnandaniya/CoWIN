@@ -79,6 +79,20 @@ Keep `/simulate/*` protected or restricted in a live deployment. Local health
 simulation and a real EC2 instance-stop are different experiments. See
 `benchmark/README.md` for the manual event workflow and measurement limits.
 
+## Admin console
+
+**`/admin/`** (`http://localhost:8081/admin/` on a local node) is a small live
+operations page for the two-zone demo: it polls each node's `/health` and the
+load balancer, draws the topology with each zone's current state and the
+serving path, and offers **Stop Zone A** / **Recover Zone A** buttons wired to
+`/simulate/fail` and `/simulate/recover`. When the node runs with
+`COWIN_API_KEY`, type the key into the page; it is sent as the `X-API-Key`
+header and kept only in memory. Endpoint addresses default to the local
+simulator topology from `benchmark/run_experiment.sh` (localhost
+8080/8081/8082) and can be changed in the page or via `?alb=&a=&b=` query
+parameters. On the real AWS deployment the ALB denies `/simulate/*` with 403,
+so the controls are for the local setup.
+
 ## Lookup frontend
 
 The service also serves a small, dependency-free frontend at **`/ui/`**
@@ -110,7 +124,7 @@ assets through the ALB listener to the same target group as the API. The public
 frontend URL is the ALB address followed by `/ui/`.
 
 The CloudFormation template embeds no application copies: each node fetches
-`app.py`, `pages.py`, `centers_data.json` and the three static assets from the repository
+`app.py`, `pages.py`, `centers_data.json` and the static assets from the repository
 at the `AppRepoRef` parameter (a commit SHA, pinned by `deploy_aws.sh` to the
 checked-out HEAD) at first boot. Deploying an updated frontend or service is
 therefore a fresh stack deploy at the new ref; running stacks do not pick up

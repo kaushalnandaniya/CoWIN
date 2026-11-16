@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CoWIN admin console: live two-zone topology, health states and failover controls.">
+  <title>CoWIN | Admin console</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+  <link rel="stylesheet" href="/ui/admin.css">
+  <script src="/ui/admin.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/ui/" aria-label="CoWIN home"><span class="brand-mark" aria-hidden="true">+</span>CoWIN</a>
+    <a class="api-link" href="/ui/">Center lookup <span aria-hidden="true">&#8599;</span></a>
+  </header>
+  <main class="admin-main">
+    <section class="admin-hero" aria-labelledby="page-title">
+      <div class="eyebrow"><span class="tiny-dot"></span> ADMIN CONSOLE</div>
+      <h1 id="page-title">Two-zone control panel.</h1>
+      <p class="intro">Live view of the load balancer and both zones, with manual failover controls.</p>
+    </section>
+
+    <section class="panel config-panel" aria-labelledby="config-title">
+      <h2 id="config-title">Topology endpoints</h2>
+      <div class="config-grid">
+        <div class="field"><label for="cfg-alb">Load balancer</label><input id="cfg-alb" type="text" spellcheck="false" autocomplete="off" placeholder="http://localhost:8080"></div>
+        <div class="field"><label for="cfg-a">Zone A node</label><input id="cfg-a" type="text" spellcheck="false" autocomplete="off" placeholder="http://localhost:8081"></div>
+        <div class="field"><label for="cfg-b">Zone B node</label><input id="cfg-b" type="text" spellcheck="false" autocomplete="off" placeholder="http://localhost:8082"></div>
+        <button id="cfg-apply" class="primary" type="button">Apply</button>
+      </div>
+      <p class="field-hint">Defaults match ./benchmark/run_experiment.sh. Saved in this browser only.</p>
+    </section>
+
+    <div class="admin-grid">
+      <section class="panel topo-panel" aria-labelledby="topo-title">
+        <div class="section-heading"><h2 id="topo-title">Live topology</h2><span id="poll-state" class="count-label">Connecting</span></div>
+        <svg id="topo" viewBox="0 0 820 440" role="img" aria-label="Live architecture diagram: client, load balancer and two service zones">
+          <path id="flow-client-alb" class="flow" d="M 172 220 L 316 220"/>
+          <path id="flow-alb-a" class="flow" d="M 472 220 C 525 220, 525 112, 572 112"/>
+          <path id="flow-alb-b" class="flow" d="M 472 220 C 525 220, 525 332, 572 332"/>
+
+          <g id="node-client" class="node node-idle">
+            <rect x="40" y="180" width="132" height="80" rx="12"></rect>
+            <text class="node-title" x="106" y="215">Client</text>
+            <text class="node-sub" x="106" y="238">browser</text>
+          </g>
+          <g id="node-alb" class="node node-unknown">
+            <rect x="316" y="170" width="156" height="100" rx="12"></rect>
+            <text class="node-title" x="394" y="205">Load balancer</text>
+            <text class="node-sub" x="394" y="228">round robin</text>
+            <text id="alb-state" class="node-state" x="394" y="250">checking</text>
+          </g>
+          <g id="node-a" class="node node-unknown">
+            <rect x="572" y="62" width="208" height="100" rx="12"></rect>
+            <text class="node-title" x="676" y="97">Zone A</text>
+            <text id="zone-a-name" class="node-sub" x="676" y="120">ap-south-1a</text>
+            <text id="zone-a-state" class="node-state" x="676" y="142">checking</text>
+          </g>
+          <g id="node-b" class="node node-unknown">
+            <rect x="572" y="282" width="208" height="100" rx="12"></rect>
+            <text class="node-title" x="676" y="317">Zone B</text>
+            <text id="zone-b-name" class="node-sub" x="676" y="340">ap-south-1b</text>
+            <text id="zone-b-state" class="node-state" x="676" y="362">checking</text>
+          </g>
+        </svg>
+        <div class="zone-stats">
+          <div class="zone-stat" id="stats-a">
+            <h3>Zone A</h3>
+            <dl>
+              <div><dt>Status</dt><dd id="stat-a-status">Unknown</dd></div>
+              <div><dt>Instance</dt><dd id="stat-a-instance" class="mono">-</dd></div>
+              <div><dt>Uptime</dt><dd id="stat-a-uptime">-</dd></div>
+              <div><dt>Requests served</dt><dd id="stat-a-requests">-</dd></div>
+            </dl>
+          </div>
+          <div class="zone-stat" id="stats-b">
+            <h3>Zone B</h3>
+            <dl>
+              <div><dt>Status</dt><dd id="stat-b-status">Unknown</dd></div>
+              <div><dt>Instance</dt><dd id="stat-b-instance" class="mono">-</dd></div>
+              <div><dt>Uptime</dt><dd id="stat-b-uptime">-</dd></div>
+              <div><dt>Requests served</dt><dd id="stat-b-requests">-</dd></div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel controls-panel" aria-labelledby="controls-title">
+        <h2 id="controls-title">Failover controls</h2>
+        <div class="field">
+          <label for="api-key">API key</label>
+          <input id="api-key" type="password" autocomplete="off" placeholder="Only if the node sets COWIN_API_KEY">
+          <span class="field-hint">Sent as the X-API-Key header. Kept in memory, never stored.</span>
+        </div>
+        <div class="control-buttons">
+          <button id="btn-stop" class="danger" type="button">Stop Zone A</button>
+          <button id="btn-recover" class="secondary" type="button">Recover Zone A</button>
+        </div>
+        <p id="control-result" class="control-result" role="status"></p>
+        <p class="field-hint">On the AWS deployment the load balancer answers /simulate/* with 403. Use this panel against the local simulator topology.</p>
+        <h3 class="log-title">Event log</h3>
+        <ul id="event-log" class="event-log"></ul>
+      </aside>
+    </div>
+  </main>
+  <footer><span>CoWIN / Two-zone cloud deployment</span></footer>
+  <noscript><p class="noscript">The admin console needs JavaScript to poll node health.</p></noscript>
+</body>
+</html>

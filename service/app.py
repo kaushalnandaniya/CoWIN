@@ -58,6 +58,10 @@ STATIC_FILES = {
     "/ui/index.html": ("index.html", "text/html; charset=utf-8"),
     "/ui/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/ui/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/admin": ("admin.html", "text/html; charset=utf-8"),
+    "/admin/": ("admin.html", "text/html; charset=utf-8"),
+    "/ui/admin.css": ("admin.css", "text/css; charset=utf-8"),
+    "/ui/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
 }
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -406,6 +410,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self.send_header("X-Served-By-Zone", self.config.zone)
         self.send_header("X-Instance-Id", self.config.instance_id)
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Expose-Headers",
+                         "X-Served-By-Zone, X-Instance-Id")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         if extra_headers:
             for name, value in extra_headers.items():
@@ -472,7 +478,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
         self.end_headers()
 
     def do_GET(self):
@@ -513,11 +519,16 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                                  status_code=503)
                 return
             self.state.record_response(path, 200)
+            csp = ("default-src 'self'; base-uri 'none'; "
+                   "frame-ancestors 'none'; form-action 'self'")
+            if filename == "admin.html":
+                # The console polls the configured load balancer and node
+                # addresses, which are not same-origin with the serving node.
+                csp += "; connect-src 'self' http: https:"
             self._set_headers(content_type=content_type, extra_headers={
                 "Content-Length": str(len(body)),
                 "X-Content-Type-Options": "nosniff",
-                "Content-Security-Policy": "default-src 'self'; base-uri 'none'; "
-                    "frame-ancestors 'none'; form-action 'self'",
+                "Content-Security-Policy": csp,
             })
             self.wfile.write(body)
             return

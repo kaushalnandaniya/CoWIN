@@ -53,6 +53,42 @@ class TestFrontend(unittest.TestCase):
                 self.assertIn(mime, response.headers['Content-Type'])
                 self.assertGreater(len(response.read()), 100)
 
+    def test_serves_admin_console(self):
+        for path in ['/admin', '/admin/']:
+            with self.subTest(path=path), self.request(path) as response:
+                body = response.read().decode()
+                self.assertEqual(response.status, 200)
+                self.assertIn('text/html', response.headers['Content-Type'])
+                self.assertIn('<title>CoWIN | Admin console</title>', body)
+                self.assertIn('/ui/admin.css', body)
+                self.assertIn('/ui/admin.js', body)
+                self.assertIn('Stop Zone A', body)
+                self.assertIn('Recover Zone A', body)
+                # No key is baked into the page: it is typed in per session.
+                self.assertIn('id="api-key"', body)
+                self.assertIn('type="password"', body)
+
+    def test_serves_admin_assets(self):
+        with self.request('/ui/admin.css') as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn('text/css', response.headers['Content-Type'])
+            self.assertGreater(len(response.read()), 100)
+        with self.request('/ui/admin.js') as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn('text/javascript', response.headers['Content-Type'])
+            script = response.read().decode()
+            self.assertIn('/simulate/fail', script)
+            self.assertIn('/simulate/recover', script)
+            self.assertIn('X-API-Key', script)
+            self.assertIn('/health', script)
+
+    def test_exposes_routing_headers_to_browser_js(self):
+        with self.html_request('/api/v1/centers?district=Pune') as response:
+            self.assertEqual(response.status, 200)
+            expose = response.headers.get('Access-Control-Expose-Headers', '')
+            self.assertIn('X-Served-By-Zone', expose)
+            self.assertIn('X-Instance-Id', expose)
+
     def test_shared_typography_has_no_remote_font_dependency(self):
         with self.request('/ui/styles.css') as response:
             css = response.read().decode()
