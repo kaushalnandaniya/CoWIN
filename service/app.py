@@ -46,6 +46,16 @@ DEFAULT_PORT = 8080
 DEFAULT_ZONE = "ap-south-1a"
 SERVICE_VERSION = "CoWIN-LookupService/1.0"
 
+# Exact allowlist: never map arbitrary URL paths onto the filesystem.
+STATIC_FILES = {
+    "/ui": ("index.html", "text/html; charset=utf-8"),
+    "/ui/": ("index.html", "text/html; charset=utf-8"),
+    "/ui/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/ui/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/ui/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
 # Mutating endpoints gated behind the X-API-Key header when COWIN_API_KEY
 # is configured. Read endpoints (health, lookup, info, metrics) stay open.
 AUTH_HEADER = "X-API-Key"
@@ -394,6 +404,26 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         instance_id = self.config.instance_id
 
         if not self._check_rate_limit(path):
+            return
+
+        if path in STATIC_FILES:
+            filename, content_type = STATIC_FILES[path]
+            try:
+                with open(os.path.join(STATIC_DIR, filename), "rb") as asset:
+                    body = asset.read()
+            except OSError:
+                self._write_json({"error": "Frontend not installed",
+                                  "message": "Deploy service/static alongside app.py"},
+                                 status_code=503)
+                return
+            self.state.record_response(path, 200)
+            self._set_headers(content_type=content_type, extra_headers={
+                "Content-Length": str(len(body)),
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'self'; base-uri 'none'; "
+                    "frame-ancestors 'none'; form-action 'self'",
+            })
+            self.wfile.write(body)
             return
 
         # Health Check Endpoint (used by AWS ALB Target Group)
