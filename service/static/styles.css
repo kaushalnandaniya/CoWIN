@@ -26,6 +26,14 @@
   /* Shared, familiar type across lookup and service views; no font downloads. */
   --sans:Arial,Helvetica,sans-serif;
   --mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  /* One spacing scale for the whole product: every gap, padding and
+     margin is a multiple of 4px drawn from these steps. */
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:16px;
+  --space-4:24px;
+  --space-5:32px;
+  --space-6:48px;
 }
 
 * {
@@ -115,8 +123,12 @@ main {
 /* === Hero === */
 
 .hero {
-  padding:32px 0 24px;
+  padding:var(--space-5) 0 var(--space-4);
   position:relative;
+}
+
+.hero h1 {
+  margin-top:0;
 }
 
 .eyebrow {
@@ -207,8 +219,8 @@ h2 {
 form {
   display:grid;
   grid-template-columns:minmax(0,1fr) minmax(8rem,.65fr) auto;
-  gap:16px;
-  align-items:start;
+  gap:var(--space-3);
+  align-items:end;
 }
 
 label {
@@ -273,7 +285,6 @@ button.primary {
   background:var(--action);
   color:#fff;
   padding:11px 24px;
-  margin-top:28px;
   display:flex;
   gap:8px;
   align-items:center;
@@ -293,10 +304,10 @@ button:disabled {
   display:flex;
   justify-content:space-between;
   align-items:center;
-  gap:16px;
-  margin-top:16px;
+  gap:var(--space-3);
+  margin-top:var(--space-4);
   border-top:1px solid var(--line);
-  padding-top:16px;
+  padding-top:var(--space-3);
 }
 
 .search-bottom p {
@@ -323,7 +334,7 @@ button:disabled {
 /* === Results === */
 
 .results-section {
-  padding:32px 0 48px;
+  padding:var(--space-6) 0;
 }
 
 .results-heading {
@@ -349,7 +360,7 @@ button:disabled {
   line-height:21px;
   color:var(--secondary);
   min-height:21px;
-  margin:12px 0 16px;
+  margin:var(--space-2) 0 var(--space-3);
 }
 
 .center-grid {
@@ -411,7 +422,7 @@ button:disabled {
   line-height:26px;
   font-weight:600;
   letter-spacing:0;
-  margin:16px 0 8px;
+  margin:var(--space-3) 0 var(--space-2);
 }
 
 .address {
@@ -425,7 +436,7 @@ button:disabled {
   font-size:14px;
   line-height:21px;
   color:var(--secondary);
-  margin:0 0 16px;
+  margin:0 0 var(--space-4);
 }
 
 .center-hours {
@@ -496,8 +507,8 @@ button:disabled {
 
 .request-panel dl {
   display:grid;
-  gap:12px;
-  margin:16px 0 12px;
+  gap:var(--space-2);
+  margin:var(--space-3) 0;
 }
 
 .request-panel dl div {
@@ -679,8 +690,8 @@ footer {
 }
 
 /* Machine-readable routes have matching browser views. */
-.sub-page { padding-bottom:48px; }
-.page-head { padding:32px 0 24px; }
+.sub-page { padding-bottom:var(--space-6); }
+.page-head { padding:var(--space-5) 0 var(--space-4); }
 .panel { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:24px; margin-bottom:24px; min-width:0; }
 .panel h2 { margin-bottom:16px; }
 .kv { margin:0; font-size:14px; line-height:21px; }

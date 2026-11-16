@@ -4,11 +4,11 @@
 .admin-main {
   max-width:1180px;
   margin:0 auto;
-  padding:32px 24px 64px;
+  padding:var(--space-5) 24px var(--space-6);
 }
 
 .admin-hero {
-  margin-bottom:28px;
+  margin-bottom:var(--space-5);
 }
 
 .admin-hero h1 {
@@ -27,11 +27,11 @@
   background:var(--surface);
   border:1px solid var(--line);
   border-radius:14px;
-  padding:22px 24px;
+  padding:var(--space-4);
 }
 
 .panel h2 {
-  margin:0 0 14px;
+  margin:0 0 var(--space-3);
   font-size:18px;
   line-height:24px;
 }
@@ -44,13 +44,13 @@
 }
 
 .config-panel {
-  margin-bottom:20px;
+  margin-bottom:var(--space-4);
 }
 
 .config-grid {
   display:grid;
   grid-template-columns:1fr 1fr 1fr auto;
-  gap:12px;
+  gap:var(--space-3);
   align-items:end;
 }
 
@@ -82,7 +82,7 @@
 .admin-grid {
   display:grid;
   grid-template-columns:minmax(0,1fr) 330px;
-  gap:20px;
+  gap:var(--space-4);
   align-items:start;
 }
 
@@ -173,15 +173,15 @@
 .zone-stats {
   display:grid;
   grid-template-columns:1fr 1fr;
-  gap:14px;
-  margin-top:16px;
+  gap:var(--space-3);
+  margin-top:var(--space-3);
 }
 
 .zone-stat {
   background:var(--surface-subtle);
   border:1px solid var(--line);
   border-radius:10px;
-  padding:14px 16px;
+  padding:var(--space-3);
 }
 
 .zone-stat h3 {
@@ -192,7 +192,7 @@
 .zone-stat dl {
   margin:0;
   display:grid;
-  gap:4px;
+  gap:var(--space-1);
 }
 
 .zone-stat dl div {
@@ -220,8 +220,14 @@
 .control-buttons {
   display:grid;
   grid-template-columns:1fr 1fr;
-  gap:10px;
-  margin-top:14px;
+  gap:var(--space-2);
+  margin-top:var(--space-3);
+}
+
+.control-buttons button {
+  white-space:nowrap;
+  padding-left:var(--space-2);
+  padding-right:var(--space-2);
 }
 
 button.primary, button.secondary, button.danger {
@@ -259,7 +265,7 @@ button.danger:disabled, button.secondary:disabled, button.primary:disabled {
 .control-result {
   min-height:20px;
   font-size:13.5px;
-  margin:12px 0 0;
+  margin:var(--space-3) 0 0;
 }
 
 .control-result.ok {
@@ -271,7 +277,7 @@ button.danger:disabled, button.secondary:disabled, button.primary:disabled {
 }
 
 .log-title {
-  margin:20px 0 8px;
+  margin:var(--space-4) 0 var(--space-2);
   font-size:14px;
 }
 
@@ -282,7 +288,7 @@ button.danger:disabled, button.secondary:disabled, button.primary:disabled {
   max-height:260px;
   overflow:auto;
   display:grid;
-  gap:6px;
+  gap:var(--space-2);
 }
 
 .event-log li {
