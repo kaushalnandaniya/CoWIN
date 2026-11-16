@@ -301,6 +301,28 @@ class TestRateLimiting(LiveServerTestCase):
         self.assertEqual(body["rate_limit"]["enabled"], True)
         self.assertGreaterEqual(body["rate_limit"]["rejected_requests"], 1)
 
+    def test_x_forwarded_for_gives_each_client_its_own_bucket(self):
+        # Behind a load balancer the peer is the balancer itself; the first
+        # X-Forwarded-For hop identities the real client, so two users must
+        # not share one bucket.
+        headers = {"X-Forwarded-For": "203.0.113.7"}
+        status, _, _ = self.request("/api/v1/centers", headers=headers)
+        self.assertEqual(status, 200)  # that client's burst token
+        status, _, _ = self.request("/api/v1/centers", headers=headers)
+        self.assertEqual(status, 429)  # that client's bucket is spent
+        other = {"X-Forwarded-For": "203.0.113.8"}
+        status, _, _ = self.request("/api/v1/centers", headers=other)
+        self.assertEqual(status, 200)  # a different client keeps its own bucket
+
+    def test_x_forwarded_for_chain_uses_first_hop(self):
+        first = {"X-Forwarded-For": "198.51.100.4, 10.0.0.1"}
+        status, _, _ = self.request("/api/v1/centers", headers=first)
+        self.assertEqual(status, 200)
+        # The same client behind a different proxy hop hits the spent bucket.
+        second = {"X-Forwarded-For": "198.51.100.4, 10.0.0.2"}
+        status, _, _ = self.request("/api/v1/centers", headers=second)
+        self.assertEqual(status, 429)
+
 
 class TestRateLimitDisabledByDefault(LiveServerTestCase):
     """With the shipped defaults nothing is ever throttled."""
@@ -345,6 +367,18 @@ class TestMetricsEndpoint(LiveServerTestCase):
         self.assertGreaterEqual(after["requests_by_endpoint"].get("/metrics", 0), 2)
         self.assertIn("404", after["responses_by_status"])
         self.assertIn("200", after["responses_by_status"])
+
+    def test_post_requests_count_toward_total(self):
+        _, _, before = self.request("/metrics")
+        # No API key is configured in this suite: the POST is allowed and
+        # must count toward total_requests_served exactly like a GET.
+        status, _, _ = self.request("/simulate/fail", method="POST")
+        self.assertEqual(status, 200)
+        self.request("/simulate/recover", method="POST")
+        _, _, after = self.request("/metrics")
+        self.assertEqual(after["total_requests_served"],
+                         before["total_requests_served"] + 3)
+        self.assertEqual(after["status"], "healthy")
 
 
 class TestHealthReadiness(LiveServerTestCase):

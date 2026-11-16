@@ -650,6 +650,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            self.state.record_request()
             self._route_post()
         except BrokenPipeError:
             logger.debug("Client closed connection during POST %s", self.path)
@@ -695,15 +696,28 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
     do_DELETE = _method_not_allowed
     do_PATCH = _method_not_allowed
 
+    def _client_ip(self):
+        """Client identity for per-client limits: the first X-Forwarded-For
+        hop when the header is present (the real client when the service
+        sits behind a load balancer), otherwise the direct peer. Keying on
+        the peer alone would give every user one shared bucket at the ALB."""
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+        return self.client_address[0]
+
     def _check_rate_limit(self, path):
         """Return True when the request may proceed under the rate limit;
         otherwise write the JSON 429 and return False."""
         if path in RATE_LIMIT_EXEMPT_PATHS:
             return True
-        if self.server.rate_limiter.allow(self.client_address[0]):
+        client_ip = self._client_ip()
+        if self.server.rate_limiter.allow(client_ip):
             return True
         logger.warning("Rate limited %s %s from %s",
-                       self.command, path, self.client_address[0])
+                       self.command, path, client_ip)
         self._write_json({
             "error": "Too Many Requests",
             "message": "Rate limit exceeded - slow down and retry"
