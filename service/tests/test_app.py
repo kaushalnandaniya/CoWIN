@@ -181,6 +181,8 @@ class TestCoWINLookupService(unittest.TestCase):
         status, headers, _ = self.request("/api/v1/centers", method="OPTIONS")
         self.assertEqual(status, 204)
         self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
+        # The admin console sends X-API-Key when the node is keyed.
+        self.assertIn("X-API-Key", headers.get("Access-Control-Allow-Headers", ""))
 
     # --- root info and fallback ---------------------------------------------
 

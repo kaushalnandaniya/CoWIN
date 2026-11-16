@@ -23,7 +23,7 @@ Production-readiness additions (still zero external dependencies):
 - Per-client-IP token-bucket rate limiting (RATE_LIMIT_RPS /
   RATE_LIMIT_BURST; 0 disables) with JSON 429s; /health and /metrics exempt
 - /metrics endpoint: uptime, zone health state, request/response counters,
-  store info, and auth/rate-limit counters for monitoring
+  store info, and rate-limit counters for monitoring
 - Readiness-aware /health: HTTP 200 only when the node can serve lookups
   (center store reachable, real dataset loaded). A dataset-load failure
   serves the fallback record but reports NOT READY so the ALB drains the
@@ -58,6 +58,10 @@ STATIC_FILES = {
     "/ui/index.html": ("index.html", "text/html; charset=utf-8"),
     "/ui/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/ui/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/admin": ("admin.html", "text/html; charset=utf-8"),
+    "/admin/": ("admin.html", "text/html; charset=utf-8"),
+    "/ui/admin.css": ("admin.css", "text/css; charset=utf-8"),
+    "/ui/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
 }
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -99,9 +103,9 @@ class ServiceConfig:
         self.zone = zone
         self.instance_id = instance_id or f"i-{socket.gethostname()[:8]}"
         # A blank configured key must not act like a real one: normalize it
-        # to "unconfigured" so the auth gate, the startup warning and
-        # /metrics agree. Previously an empty COWIN_API_KEY accepted a
-        # missing X-API-Key header while /metrics reported auth enabled.
+        # to "unconfigured" so the auth gate and the startup warning
+        # agree. Previously an empty COWIN_API_KEY accepted a
+        # missing X-API-Key header as if no key were configured.
         if api_key is not None and not str(api_key).strip():
             api_key = None
         self.api_key = api_key
@@ -142,7 +146,6 @@ class ServiceState:
         self.request_count = 0
         self.force_unhealthy = False
 
-        self.auth_failures = 0
         self.requests_by_endpoint = {}
         self.responses_by_status = {}
 
@@ -150,14 +153,6 @@ class ServiceState:
         with self._lock:
             self.request_count += 1
             return self.request_count
-
-    def record_auth_failure(self):
-        with self._lock:
-            self.auth_failures += 1
-
-    def auth_failure_count(self):
-        with self._lock:
-            return self.auth_failures
 
     def record_response(self, path, status_code):
         with self._lock:
@@ -406,6 +401,8 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self.send_header("X-Served-By-Zone", self.config.zone)
         self.send_header("X-Instance-Id", self.config.instance_id)
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Expose-Headers",
+                         "X-Served-By-Zone, X-Instance-Id")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         if extra_headers:
             for name, value in extra_headers.items():
@@ -472,7 +469,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
         self.end_headers()
 
     def do_GET(self):
@@ -513,11 +510,16 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                                  status_code=503)
                 return
             self.state.record_response(path, 200)
+            csp = ("default-src 'self'; base-uri 'none'; "
+                   "frame-ancestors 'none'; form-action 'self'")
+            if filename == "admin.html":
+                # The console polls the configured load balancer and node
+                # addresses, which are not same-origin with the serving node.
+                csp += "; connect-src 'self' http: https:"
             self._set_headers(content_type=content_type, extra_headers={
                 "Content-Length": str(len(body)),
                 "X-Content-Type-Options": "nosniff",
-                "Content-Security-Policy": "default-src 'self'; base-uri 'none'; "
-                    "frame-ancestors 'none'; form-action 'self'",
+                "Content-Security-Policy": csp,
             })
             self.wfile.write(body)
             return
@@ -737,7 +739,6 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get(AUTH_HEADER, "")
         if hmac.compare_digest(supplied, self.config.api_key):
             return True
-        self.state.record_auth_failure()
         logger.warning("Rejected %s %s from %s: missing or invalid API key",
                        self.command, self.path, self.client_address[0])
         self._write_json({
@@ -766,10 +767,6 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                 "centers_loaded": store_health["centers"],
                 "ready": store_health["ok"],
                 "detail": store_health["detail"],
-            },
-            "auth": {
-                "enabled": self.config.api_key is not None,
-                "failed_attempts": self.state.auth_failure_count(),
             },
             "rate_limit": {
                 "enabled": limiter.enabled,

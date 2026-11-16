@@ -8,10 +8,8 @@ import html
 import time
 
 BRAND = ('<a class="brand" href="/ui/" aria-label="CoWIN home">'
-         '<span class="brand-mark" aria-hidden="true">+</span>CoWIN'
-         '<span class="brand-tag">CLOUD LAB</span></a>')
-FOOTER = ('<footer><span>CoWIN / Two-zone cloud deployment</span>'
-          '<span>Sample data. Real API requests.</span></footer>')
+         '<span class="brand-mark" aria-hidden="true">+</span>CoWIN</a>')
+FOOTER = '<footer><span>CoWIN / Two-zone cloud deployment</span></footer>'
 
 
 def _e(value):
@@ -188,7 +186,6 @@ def _center_card(center):
             f'<p class="location">{_e(location)}</p>'
             f'<div class="center-hours">Hours: {_e(start)} - {_e(end)}</div>'
             f'<div class="sessions">{sessions_html}</div>'
-            f'<div class="card-foot">SESSIONS &middot; NOT LIVE AVAILABILITY</div>'
             f'</article>')
 
 
@@ -217,7 +214,7 @@ def centers_page(data, filters):
     content = f"""
     <section class="panel">
       <h2>Query</h2>
-      <p class="muted-note">{scope}. Sample data, not live availability.</p>
+      <p class="muted-note">{scope}.</p>
       {summary}
     </section>
     {results}
@@ -231,7 +228,6 @@ def centers_page(data, filters):
 def metrics_page(data):
     limiter = data.get('rate_limit', {})
     store = data.get('store', {})
-    auth = data.get('auth', {})
     by_endpoint = data.get('requests_by_endpoint', {})
     by_status = data.get('responses_by_status', {})
     endpoint_rows = ''.join(
@@ -276,8 +272,6 @@ def metrics_page(data):
       {_kv([
         ('Store backend', store.get('backend', ''), False),
         ('Centers loaded', store.get('centers_loaded', ''), False),
-        ('API key required', 'Yes' if auth.get('enabled') else 'No', False),
-        ('Failed auth attempts', auth.get('failed_attempts', ''), False),
         ('Rate limiting', 'On' if limiter.get('enabled') else 'Off', False),
         ('Rejected requests', limiter.get('rejected_requests', 0), False),
         ('Rate limit', f"{limiter.get('requests_per_second', '')} req/s, "

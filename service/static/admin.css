@@ -1,0 +1,391 @@
+/* Admin console styles, on top of the shared "clinical clarity" theme
+   (styles.css tokens and base elements). No external assets. */
+
+.admin-main {
+  max-width:1180px;
+  margin:0 auto;
+  padding:var(--space-5) 24px var(--space-6);
+}
+
+.admin-hero {
+  margin-bottom:var(--space-5);
+}
+
+.admin-hero h1 {
+  margin:8px 0 8px;
+  font-size:40px;
+  line-height:46px;
+  letter-spacing:-0.01em;
+}
+
+.admin-hero .intro {
+  margin:0;
+  color:var(--secondary);
+}
+
+.panel {
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:var(--space-4);
+}
+
+.panel h2 {
+  margin:0 0 var(--space-3);
+  font-size:18px;
+  line-height:24px;
+}
+
+.section-heading {
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:12px;
+}
+
+.config-panel {
+  margin-bottom:var(--space-4);
+}
+
+.config-grid {
+  display:grid;
+  grid-template-columns:1fr 1fr 1fr auto;
+  gap:var(--space-3);
+  align-items:end;
+}
+
+.field label {
+  display:block;
+  font-size:13px;
+  font-weight:600;
+  margin-bottom:4px;
+}
+
+.field input {
+  width:100%;
+  padding:9px 11px;
+  border:1px solid var(--control-border);
+  border-radius:9px;
+  font:inherit;
+  font-size:14px;
+  background:var(--surface);
+  color:var(--ink);
+}
+
+.field-hint {
+  display:block;
+  font-size:12.5px;
+  color:var(--muted);
+  margin:6px 0 0;
+}
+
+.admin-grid {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 330px;
+  gap:var(--space-4);
+  align-items:start;
+}
+
+/* === Live topology diagram === */
+
+#topo {
+  width:100%;
+  height:auto;
+  display:block;
+  margin-top:6px;
+}
+
+.node rect {
+  fill:var(--surface-subtle);
+  stroke:var(--line);
+  stroke-width:1.5;
+  transition:fill 0.4s, stroke 0.4s;
+}
+
+.node text {
+  text-anchor:middle;
+  font-family:var(--sans);
+}
+
+.node-title {
+  font-size:16px;
+  font-weight:700;
+  fill:var(--ink);
+}
+
+.node-sub {
+  font-size:12px;
+  fill:var(--muted);
+  font-family:var(--mono);
+}
+
+.node-state {
+  font-size:12.5px;
+  font-weight:600;
+  fill:var(--muted);
+}
+
+.node-ok rect {
+  fill:var(--success-fill);
+  stroke:#86B89A;
+}
+
+.node-ok .node-state {
+  fill:var(--success-text);
+}
+
+.node-bad rect {
+  fill:var(--error-fill);
+  stroke:#D98C8C;
+}
+
+.node-bad .node-state {
+  fill:var(--error-text);
+}
+
+.node-down rect {
+  fill:#E9EDF3;
+  stroke:#B9C2CF;
+  stroke-dasharray:5 4;
+}
+
+.node-down .node-state {
+  fill:var(--muted);
+}
+
+.flow {
+  fill:none;
+  stroke:#B9C2CF;
+  stroke-width:2;
+  transition:stroke 0.3s;
+}
+
+.flow.flow-on {
+  stroke:var(--action);
+  stroke-dasharray:7 6;
+  animation:flow-move 0.9s linear infinite;
+}
+
+@keyframes flow-move {
+  to { stroke-dashoffset:-13; }
+}
+
+.zone-stats {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:var(--space-3);
+  margin-top:var(--space-3);
+}
+
+.zone-stat {
+  background:var(--surface-subtle);
+  border:1px solid var(--line);
+  border-radius:10px;
+  padding:var(--space-3);
+}
+
+.zone-stat h3 {
+  margin:0 0 8px;
+  font-size:14px;
+}
+
+.zone-stat dl {
+  margin:0;
+  display:grid;
+  gap:var(--space-1);
+}
+
+.zone-stat dl div {
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  font-size:13px;
+}
+
+.zone-stat dt {
+  color:var(--muted);
+}
+
+.zone-stat dd {
+  margin:0;
+  text-align:right;
+}
+
+.mono {
+  font-family:var(--mono);
+}
+
+/* === Controls === */
+
+.control-buttons {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:var(--space-2);
+  margin-top:var(--space-3);
+}
+
+.control-buttons button {
+  white-space:nowrap;
+  padding-left:var(--space-2);
+  padding-right:var(--space-2);
+}
+
+button.primary, button.secondary, button.danger {
+  font:inherit;
+  font-weight:600;
+  border-radius:9px;
+  padding:10px 14px;
+  cursor:pointer;
+  border:1px solid transparent;
+}
+
+button.primary {
+  background:var(--action);
+  color:#fff;
+}
+
+button.primary:hover {
+  background:var(--action-hover);
+}
+
+button.danger {
+  background:var(--error-text);
+  color:#fff;
+}
+
+button.danger:hover {
+  background:#991B1B;
+}
+
+button.danger:disabled, button.secondary:disabled, button.primary:disabled {
+  opacity:0.55;
+  cursor:default;
+}
+
+.control-result {
+  min-height:20px;
+  font-size:13.5px;
+  margin:var(--space-3) 0 0;
+}
+
+.control-result.ok {
+  color:var(--success-text);
+}
+
+.control-result.err {
+  color:var(--error-text);
+}
+
+.log-title {
+  margin:var(--space-4) 0 var(--space-2);
+  font-size:14px;
+}
+
+.event-log {
+  list-style:none;
+  margin:0;
+  padding:0;
+  max-height:260px;
+  overflow:auto;
+  display:grid;
+  gap:var(--space-2);
+}
+
+.event-log li {
+  font-size:12.5px;
+  line-height:18px;
+  background:var(--surface-subtle);
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:7px 10px;
+}
+
+.event-log li .log-time {
+  font-family:var(--mono);
+  color:var(--muted);
+  margin-right:6px;
+}
+
+.event-log li.log-bad {
+  border-color:#D98C8C;
+  background:var(--error-fill);
+}
+
+.event-log li.log-ok {
+  border-color:#86B89A;
+  background:var(--success-fill);
+}
+
+@media (max-width:900px) {
+  .admin-grid {
+    grid-template-columns:1fr;
+  }
+  .config-grid {
+    grid-template-columns:1fr;
+  }
+  .zone-stats {
+    grid-template-columns:1fr;
+  }
+  .admin-hero h1 {
+    font-size:30px;
+    line-height:36px;
+  }
+}
+
+/* === Motion and failover emphasis === */
+
+.dot {
+  fill:var(--action);
+}
+
+.flow.flow-flash {
+  stroke:var(--action-hover);
+  stroke-width:4;
+  stroke-dasharray:none;
+  animation:flow-pulse 0.8s ease-in-out 3;
+}
+
+@keyframes flow-pulse {
+  50% { stroke-width:7; }
+}
+
+.node rect, .node .node-state {
+  transition:fill 0.4s, stroke 0.4s;
+}
+
+.node.node-just-changed rect {
+  animation:node-pop 0.6s ease-out 1;
+}
+
+@keyframes node-pop {
+  30% { stroke-width:4; }
+}
+
+.spark {
+  width:100%;
+  height:28px;
+  margin-top:10px;
+  display:block;
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:6px;
+}
+
+.spark polyline {
+  fill:none;
+  stroke:var(--action);
+  stroke-width:1.5;
+}
+
+.zone-stat.spark-bad polyline {
+  stroke:var(--error-text);
+}
+
+.event-log li {
+  animation:log-in 0.25s ease-out 1;
+}
+
+@keyframes log-in {
+  from { opacity:0; transform:translateY(-4px); }
+  to { opacity:1; transform:none; }
+}

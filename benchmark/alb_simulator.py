@@ -132,6 +132,8 @@ class ALBProxyHandler(BaseHTTPRequestHandler):
         if self.path == "/alb/status":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            # The admin console polls this cross-origin from a service node.
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             with TARGETS_LOCK:
                 info = {

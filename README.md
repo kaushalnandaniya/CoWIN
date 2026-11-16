@@ -57,7 +57,7 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
 | --- | --- |
 | `GET /health` | Readiness check used by the load balancer. Returns 200 only when the store is reachable and the dataset is loaded. |
 | `GET /api/v1/centers` | Vaccination-centre lookup. Filter with `?district=` and `?pincode=`. |
-| `GET /metrics` | Uptime, zone health, per-endpoint and per-status counters, store, auth and rate-limit counters. |
+| `GET /metrics` | Uptime, zone health, per-endpoint and per-status counters, store and rate-limit counters. |
 | `GET /info` | Service information and endpoint directory. |
 | `GET /ui/` | Responsive lookup frontend. |
 | `/simulate/fail`, `/simulate/recover` | Force the health check to fail or recover. Requires `X-API-Key` when `COWIN_API_KEY` is set. |
