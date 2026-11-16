@@ -10,8 +10,7 @@ import time
 BRAND = ('<a class="brand" href="/ui/" aria-label="CoWIN home">'
          '<span class="brand-mark" aria-hidden="true">+</span>CoWIN'
          '<span class="brand-tag">CLOUD LAB</span></a>')
-FOOTER = ('<footer><span>CoWIN / Two-zone cloud deployment</span>'
-          '<span>Sample data. Real API requests.</span></footer>')
+FOOTER = '<footer><span>CoWIN / Two-zone cloud deployment</span></footer>'
 
 
 def _e(value):
@@ -188,7 +187,6 @@ def _center_card(center):
             f'<p class="location">{_e(location)}</p>'
             f'<div class="center-hours">Hours: {_e(start)} - {_e(end)}</div>'
             f'<div class="sessions">{sessions_html}</div>'
-            f'<div class="card-foot">SESSIONS &middot; NOT LIVE AVAILABILITY</div>'
             f'</article>')
 
 
@@ -217,7 +215,7 @@ def centers_page(data, filters):
     content = f"""
     <section class="panel">
       <h2>Query</h2>
-      <p class="muted-note">{scope}. Sample data, not live availability.</p>
+      <p class="muted-note">{scope}.</p>
       {summary}
     </section>
     {results}

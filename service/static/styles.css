@@ -477,16 +477,6 @@ button:disabled {
   margin-top:4px;
 }
 
-.card-foot {
-  font-size:12px;
-  line-height:18px;
-  font-weight:600;
-  letter-spacing:0.06em;
-  color:var(--muted);
-  margin-top:16px;
-}
-
-
 /* === Request panel (last lookup response) === */
 
 .request-panel {
