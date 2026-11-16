@@ -115,7 +115,9 @@ class TestFrontend(unittest.TestCase):
                 self.assertEqual(response.headers['Vary'], 'Accept')
                 self.assertIn(heading, body)
                 self.assertIn('/ui/styles.css', body)
-                self.assertIn('Sample data. Real API requests.', body)
+                self.assertIn('CoWIN / Two-zone cloud deployment', body)
+                self.assertNotIn('Sample data', body)
+                self.assertNotIn('NOT LIVE AVAILABILITY', body)
                 self.assertEqual(int(response.headers['Content-Length']), len(body.encode()))
                 self.assertIn("default-src 'self'", response.headers['Content-Security-Policy'])
 
