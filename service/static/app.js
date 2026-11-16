@@ -46,7 +46,7 @@
     setBusy(true);
     $('error').hidden = true;
     $('empty').hidden = true;
-    $('centers').replaceChildren();
+    $('centers').classList.add('is-loading');
     $('result-count').textContent = 'Searching';
     $('status').textContent = 'Requesting sample centers from the API...';
     $('request-state').textContent = 'Lookup in progress';
@@ -69,7 +69,7 @@
       if (!Array.isArray(data.centers) || !data.centers.every(center => center && typeof center === 'object' && !Array.isArray(center))) throw new Error('The API returned an unexpected response. Please try again.');
       const fragment = document.createDocumentFragment();
       for (const center of data.centers) fragment.append(renderCenter(center));
-      $('centers').append(fragment);
+      $('centers').replaceChildren(fragment);
       $('empty').hidden = data.centers.length !== 0;
       $('result-count').textContent = `${data.centers.length} ${data.centers.length === 1 ? 'center' : 'centers'}`;
       const scope = [filters.district && `district "${filters.district}"`, filters.pincode && `pincode ${filters.pincode}`].filter(Boolean).join(' and ');
@@ -81,17 +81,17 @@
       $('request-dot').style.background = '#126653';
       $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } catch (error) {
-      $('centers').replaceChildren();
       $('error').hidden = false;
       $('error-message').textContent = error.name === 'AbortError' ? 'The API took longer than 10 seconds to respond. Please try again.' : error instanceof TypeError ? 'Cannot reach the API. Check your connection, then try again.' : error instanceof SyntaxError ? 'The API returned an unreadable response. Please try again.' : error.message;
       $('result-count').textContent = 'Unavailable';
-      $('status').textContent = 'No current results to display.';
+      $('status').textContent = $('centers').childElementCount ? 'Lookup failed. The previous results are still shown.' : 'No current results to display.';
       $('request-state').textContent = 'Lookup failed';
       $('zone').textContent = 'Unknown';
       $('instance').textContent = 'Unknown';
       $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } finally {
       clearTimeout(timeout);
+      $('centers').classList.remove('is-loading');
       setBusy(false);
     }
   }
