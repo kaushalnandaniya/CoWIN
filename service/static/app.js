@@ -73,7 +73,8 @@
       $('empty').hidden = data.centers.length !== 0;
       $('result-count').textContent = `${data.centers.length} ${data.centers.length === 1 ? 'center' : 'centers'}`;
       const scope = [filters.district && `district "${filters.district}"`, filters.pincode && `pincode ${filters.pincode}`].filter(Boolean).join(' and ');
-      $('status').textContent = scope ? `Sample results for ${scope}.` : 'Showing all centers in the sample dataset.';
+      const found = `${data.centers.length} sample ${data.centers.length === 1 ? 'center' : 'centers'}`;
+      $('status').textContent = scope ? `${found} found for ${scope}.` : `Showing all ${data.centers.length} centers in the sample dataset.`;
       $('zone').textContent = data.served_by?.zone || 'Not reported';
       $('instance').textContent = data.served_by?.instance_id || 'Not reported';
       $('request-state').textContent = 'API responded';
@@ -95,9 +96,33 @@
     }
   }
 
+  const PINCODE_RULE = /^[1-9][0-9]{5}$/;
+  const PINCODE_MESSAGE = 'Enter a 6-digit pincode that starts with 1-9 (no leading zero), or leave the field blank.';
+
+  function validatePincode(value) {
+    const error = $('pincode-error');
+    if (value === '' || PINCODE_RULE.test(value)) {
+      error.hidden = true;
+      error.textContent = '';
+      $('pincode').removeAttribute('aria-invalid');
+      return true;
+    }
+    error.textContent = PINCODE_MESSAGE;
+    error.hidden = false;
+    $('pincode').setAttribute('aria-invalid', 'true');
+    $('pincode').focus();
+    return false;
+  }
+
+  $('pincode').addEventListener('input', () => {
+    if (!$('pincode-error').hidden) validatePincode($('pincode').value.trim());
+  });
+
   form.addEventListener('submit', event => {
     event.preventDefault();
-    if (form.reportValidity()) lookup({ district: $('district').value.trim(), pincode: $('pincode').value.trim() });
+    const pincode = $('pincode').value.trim();
+    if (!validatePincode(pincode)) return;
+    lookup({ district: $('district').value.trim(), pincode });
   });
   $('reset-button').addEventListener('click', () => { form.reset(); lookup({ district: '', pincode: '' }); });
   $('retry-button').addEventListener('click', () => lookup(lastFilters));

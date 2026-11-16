@@ -226,6 +226,17 @@ input:focus-visible,button:focus-visible,a:focus-visible {
   outline-offset:3px;
 }
 
+.field-error {
+  display: block;
+  font-size: 13px;
+  color: #75462c;
+  margin-top: 6px;
+}
+
+input[aria-invalid="true"] {
+  border-color: #b5673f;
+}
+
 .field-hint {
   display:block;
   font-size:13px;

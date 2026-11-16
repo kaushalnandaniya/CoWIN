@@ -25,8 +25,8 @@
       <section class="search-panel" aria-labelledby="search-title">
       <div class="section-heading"><h2 id="search-title">Where would you like to search?</h2></div>
       <form id="search-form">
-        <div class="field"><label for="district">District</label><input id="district" name="district" type="text" maxlength="100" placeholder="e.g. Ahmedabad" autocomplete="off"><span class="field-hint">Partial names work too</span></div>
-        <div class="field"><label for="pincode">Pincode</label><input id="pincode" name="pincode" type="text" inputmode="numeric" pattern="[1-9][0-9]{5}" maxlength="6" placeholder="e.g. 380009" aria-describedby="pincode-hint"><span id="pincode-hint" class="field-hint">6 digits, optional</span></div>
+        <div class="field"><label for="district">District</label><input id="district" name="district" type="text" maxlength="100" placeholder="e.g. Ahmedabad" autocomplete="off" aria-describedby="district-hint"><span id="district-hint" class="field-hint">Partial names work too</span></div>
+        <div class="field"><label for="pincode">Pincode</label><input id="pincode" name="pincode" type="text" inputmode="numeric" maxlength="6" placeholder="e.g. 380009" aria-describedby="pincode-hint pincode-error"><span id="pincode-hint" class="field-hint">6 digits, optional</span><span id="pincode-error" class="field-error" role="alert" hidden></span></div>
         <button id="search-button" class="primary" type="submit">Find centers <span aria-hidden="true">→</span></button>
       </form>
       <div class="search-bottom"><p>Use either field, or combine both to narrow your search.</p><button id="reset-button" class="text-button" type="button">Show all sample centers</button></div>
