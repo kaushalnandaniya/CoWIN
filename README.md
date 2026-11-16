@@ -122,10 +122,10 @@ Reference run ([`benchmark/benchmark_results.json`](benchmark/benchmark_results.
 | Metric | Value |
 | --- | --- |
 | Requests | 320 / 320 successful |
-| Failover detection and traffic shift | 2.1 s |
+| Failover detection and traffic shift | 2.3 s |
 | Client-visible disruption | 0.0 s |
 | Recovered node back in rotation | about 2 s after recovery |
-| Latency p50 / p99 | 1.34 ms / 2.21 ms |
+| Latency p50 / p99 | 2.28 ms / 3.33 ms |
 
 The simulator uses the template's threshold semantics (2 failures to remove, 2 successes to restore) but probes every 1 s with a 0.8 s timeout, against 5 s and 2 s on AWS. These numbers characterize the failover logic, not AWS network behavior.
 

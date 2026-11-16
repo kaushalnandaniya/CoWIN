@@ -1,43 +1,80 @@
 {
   "benchmark_metadata": {
-    "course": "IT457 Cloud Computing",
-    "project": "CoWIN Two-Zone High Availability PoC",
-    "date": "2026-11-12 14:53:56",
+    "schema_version": 2,
+    "environment": "local-simulator",
+    "started_at_utc": "2026-11-16T08:45:35.159346+00:00",
     "target_url": "http://localhost:9080",
-    "duration_seconds": 32,
-    "request_rate_rps": 10
+    "requested_duration_seconds": 32.0,
+    "actual_duration_seconds": 32.0,
+    "request_rate_rps": 10.0,
+    "achieved_rps": 10.0,
+    "sampler": "sequential; target rate is an upper bound",
+    "failure_mode": "health-degradation",
+    "failed_zone": "ap-south-1a",
+    "convergence_window": 5
   },
   "throughput_metrics": {
     "total_requests": 320,
     "successful_requests": 320,
     "failed_requests": 0,
-    "success_rate_percent": 100.0,
-    "error_rate_percent": 0.0
+    "success_rate_percent": 100.0
   },
   "latency_percentiles_ms": {
-    "min": 1.18,
-    "mean": 1.39,
-    "p50": 1.34,
-    "p90": 1.48,
-    "p95": 1.65,
-    "p99": 2.21,
-    "max": 3.77
+    "p50": 2.28,
+    "p90": 2.52,
+    "p95": 2.68,
+    "p99": 3.33,
+    "min": 1.895,
+    "max": 3.961,
+    "mean": 2.313
   },
   "traffic_distribution": {
-    "zone_a_ap_south_1a_requests": 99,
-    "zone_b_ap_south_1b_requests": 221,
-    "zone_a_share_percent": 30.9,
-    "zone_b_share_percent": 69.1
+    "ap-south-1a": 100,
+    "ap-south-1b": 220
   },
   "availability_and_failover": {
-    "failure_injected_at_second": 10.0,
+    "two_zone_baseline_observed": true,
     "failover_achieved": true,
-    "failover_time_seconds": 2.1,
+    "failover_time_seconds": 2.31,
     "disruption_window_seconds": 0.0,
-    "failed_requests_during_experiment": 0,
-    "recovery_time_objective_rto_seconds": 2.1,
-    "recovery_point_objective_rpo": "0 seconds (Read/Lookup Service Stateless)",
+    "stable_service_resumption_seconds": 0.0,
+    "recovery_observed": true,
     "survivor_zone": "ap-south-1b",
-    "post_failover_availability_percent": 100.0
-  }
+    "rpo": "not measured; this read-only test does not validate database replication",
+    "measurement_note": "Survivor streak is a client estimate, not ALB health detection or guaranteed RTO. Disruption span is first-to-last failed sample, which can be zero for one error. Stable resumption measures first error to a successful survivor streak (either healthy zone after recovery). Absence of samples cannot prove availability."
+  },
+  "events": [
+    {
+      "event": "failure",
+      "timestamp": 1794818745.1785223,
+      "elapsed_s": 10.019,
+      "source": "local-health-simulation",
+      "note": ""
+    },
+    {
+      "event": "failover",
+      "timestamp": 1794818747.4859722,
+      "elapsed_s": 12.327,
+      "source": "client-observation"
+    },
+    {
+      "event": "recovery",
+      "timestamp": 1794818757.2024064,
+      "elapsed_s": 22.043,
+      "source": "local-health-simulation",
+      "note": ""
+    },
+    {
+      "event": "rebalanced",
+      "timestamp": 1794818759.209259,
+      "elapsed_s": 24.05,
+      "source": "client-observation"
+    }
+  ],
+  "injection_errors": [],
+  "limitations": [
+    "No AWS health snapshots or video collected by this client.",
+    "Local simulation changes health only; it does not stop an EC2 instance.",
+    "Sequential sampling can miss short disruptions and cannot guarantee offered load."
+  ]
 }
