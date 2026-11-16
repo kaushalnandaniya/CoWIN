@@ -170,20 +170,6 @@ h1 {
   margin:0 0 16px;
 }
 
-.info-note {
-  max-width:760px;
-  background:var(--surface-subtle);
-  border-left:3px solid var(--control-border);
-  padding:12px;
-  font-size:14px;
-  line-height:21px;
-  color:var(--secondary);
-}
-
-.info-note strong {
-  font-weight:600;
-  color:var(--ink);
-}
 
 
 /* === Lookup row: search panel + request panel === */
@@ -643,25 +629,6 @@ footer {
 @media(min-width:768px) {
   .center-grid {
     grid-template-columns:repeat(2,minmax(0,1fr));
-  }
-}
-
-@media(min-width:1024px) {
-  .hero:after {
-    content:"+";
-    position:absolute;
-    right:48px;
-    top:32px;
-    width:120px;
-    height:120px;
-    display:grid;
-    place-items:center;
-    font-size:96px;
-    font-weight:200;
-    color:var(--secondary);
-    border:1px solid var(--line);
-    border-radius:50%;
-    background:var(--surface-subtle);
   }
 }
 
