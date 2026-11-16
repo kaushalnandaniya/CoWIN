@@ -47,7 +47,7 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
 | Network isolation | Custom VPC (`10.0.0.0/16`) with one public subnet per zone. Instances accept port 8080 only from the load balancer's security group. |
 | Health-gated routing | The target group removes a node after 2 consecutive failed probes and restores it after 2 successes. |
 | Stateless nodes | Every node serves the same dataset, so failover and recovery lose no state. RPO is zero by construction. |
-| Failure injection | Zone-pinned listener rules forward `/simulate/zone-a/*` and `/simulate/zone-b/*` to a single-zone target group, so a drill always hits the intended zone (every other `/simulate/*` is denied at the listener). The node still requires the API key, rejects a call for the wrong zone, refuses to degrade a second zone while its peer is unhealthy, and auto-recovers a simulated failure after about two minutes even if nobody recovers it. |
+| Failure injection | Zone-pinned listener rules forward `/simulate/zone-a/*` and `/simulate/zone-b/*` to a single-zone target group, so a drill always hits the intended zone (every other `/simulate/*` is denied at the listener). The node still requires the API key, rejects a call for the wrong zone, refuses a second failure while its peer is unhealthy - even under simultaneous commands, where intent-first marking makes the loser back off with a 409 - and auto-recovers a simulated failure after about two minutes even if nobody recovers it. |
 | Self-healing | Each node runs the service under systemd with `Restart=always`. |
 
 ## Service

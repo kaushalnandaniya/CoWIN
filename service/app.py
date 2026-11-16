@@ -852,7 +852,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         writes the JSON 409 and returns False. With no COWIN_PEER_URL
         configured (single-node dev setups) the check is skipped. An
         unreachable peer counts as unhealthy: never degrade the second
-        zone while the first may already be down for real.
+        zone while the first may already be down for real. Called from
+        _simulate_fail while holding the node's simulate_lock, after
+        the intent mark, so a racing peer sees this node failing.
         """
         peer = self.config.peer_url
         if not peer:
@@ -903,10 +905,27 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             self.server.auto_recover_timer = None
 
     def _simulate_fail(self):
-        if not self._peer_allows_failure():
-            return
-        self.state.set_unhealthy(True)
-        self._schedule_auto_recover()
+        if self.state.is_unhealthy():
+            # Already in simulated failure: idempotent re-arm of the
+            # auto-recover timer, no peer re-check (this node already
+            # holds the one allowed failure).
+            self._schedule_auto_recover()
+        else:
+            # Intent-first check-and-set, safe against simultaneous
+            # fail commands on both nodes: mark our own failure BEFORE
+            # consulting the peer. A peer whose health read observed us
+            # healthy finished that read before our mark, so its own
+            # read of us happens after our mark (program order) and
+            # must see us failing - it backs off with a 409. If we are
+            # the one who sees the peer failing, we roll back our
+            # intent and refuse. At most one node stays failed; in the
+            # worst interleaving both refuse and neither goes down.
+            with self.server.simulate_lock:
+                self.state.set_unhealthy(True)
+                if not self._peer_allows_failure():
+                    self.state.set_unhealthy(False)  # lost the race: undo
+                    return
+                self._schedule_auto_recover()
         logger.warning("Simulated failure ENABLED - /health now returns 500")
         self._write_json({
             "message": "Health check now returning 500",
@@ -943,6 +962,10 @@ class CoWINHTTPServer(ThreadingHTTPServer):
         self.rate_limiter = RateLimiter(config.rate_limit_rps,
                                         config.rate_limit_burst)
         self.auto_recover_timer = None
+        # Serializes simulated fail/recover on this node so the
+        # intent-then-verify sequence in _simulate_fail is atomic
+        # against local concurrent requests.
+        self.simulate_lock = threading.Lock()
         super().__init__((config.host, config.port), CoWINLookupHandler)
 
     def server_close(self):

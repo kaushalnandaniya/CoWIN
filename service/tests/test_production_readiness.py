@@ -624,8 +624,8 @@ class TestSimulateAutoRecover(unittest.TestCase):
 
 class TestSimulatePeerInterlock(unittest.TestCase):
     """The cross-zone safety invariant: with a peer configured, a node
-    refuses /simulate/fail while the other zone is unhealthy, so both
-    zones can never be degraded at once."""
+    refuses /simulate/fail while the other zone is unhealthy, so at
+    most one zone is in simulated failure at a time."""
 
     def setUp(self):
         self.a = start_test_server(zone="test-zone-1a")
@@ -669,6 +669,100 @@ class TestSimulatePeerInterlock(unittest.TestCase):
         stop_test_server(self.a[0], self.a[1])
         self.a = None
         self.assertEqual(self._post(self.b[2], "/simulate/zone-b/fail"), 409)
+
+
+class TestSimulateFailRace(unittest.TestCase):
+    """Concurrency regression: simultaneous fail commands on both zones.
+
+    The peer-health interlock used to be check-then-set, so two fail
+    requests fired at the same moment both saw a healthy peer and both
+    failed their zone - the whole site went dark. The fix marks the
+    node's own failure intent before consulting the peer and rolls
+    back when the peer is already failing, so under ANY interleaving
+    the losing command gets a 409. In a dead heat BOTH commands may be
+    refused (neither zone goes down); the operator retries one.
+    """
+
+    ROUNDS = 25
+
+    def setUp(self):
+        self.a = start_test_server(zone="test-zone-1a")
+        self.b = start_test_server(zone="test-zone-1b")
+        self.a[0].config.peer_url = self.b[2]
+        self.b[0].config.peer_url = self.a[2]
+
+    def tearDown(self):
+        for server in (self.a, self.b):
+            req = urllib.request.Request(server[2] + "/simulate/recover",
+                                         method="POST")
+            try:
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+            stop_test_server(server[0], server[1])
+
+    def _post(self, base, path, results, slot, barrier):
+        barrier.wait()
+        req = urllib.request.Request(base + path, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                results[slot] = resp.status
+        except urllib.error.HTTPError as e:
+            results[slot] = e.code
+
+    def _health(self, base):
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_simultaneous_fail_never_takes_both_zones_down(self):
+        for _ in range(self.ROUNDS):
+            results = [None, None]
+            barrier = threading.Barrier(2)
+            threads = [
+                threading.Thread(target=self._post,
+                                 args=(self.a[2], "/simulate/fail",
+                                       results, 0, barrier)),
+                threading.Thread(target=self._post,
+                                 args=(self.b[2], "/simulate/fail",
+                                       results, 1, barrier)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            # Never both accepted...
+            self.assertNotEqual(results, [200, 200],
+                                "both zones accepted simultaneous fail")
+            # ...and never both left failing afterwards.
+            states = (self._health(self.a[2]), self._health(self.b[2]))
+            self.assertNotEqual(states, (500, 500),
+                                "both zones left failing after the race")
+            # Reset for the next round.
+            for base in (self.a[2], self.b[2]):
+                req = urllib.request.Request(base + "/simulate/recover",
+                                             method="POST")
+                try:
+                    urllib.request.urlopen(req, timeout=5)
+                except Exception:
+                    pass
+
+    def test_staggered_fail_second_gets_409(self):
+        # A wins cleanly; a slightly later B must be refused, not race in.
+        self.assertEqual(self._post_sync(self.a[2], "/simulate/fail"), 200)
+        self.assertEqual(self._post_sync(self.b[2], "/simulate/fail"), 409)
+        self.assertEqual(self._health(self.a[2]), 500)
+        self.assertEqual(self._health(self.b[2]), 200)
+
+    def _post_sync(self, base, path):
+        req = urllib.request.Request(base + path, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
 
 
 if __name__ == "__main__":

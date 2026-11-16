@@ -106,8 +106,12 @@
           <button id="btn-stop" class="danger" type="button">Stop Zone A</button>
           <button id="btn-recover" class="secondary" type="button">Recover Zone A</button>
         </div>
+        <div class="control-buttons">
+          <button id="btn-stop-b" class="danger" type="button">Stop Zone B</button>
+          <button id="btn-recover-b" class="secondary" type="button">Recover Zone B</button>
+        </div>
         <p id="control-result" class="control-result" role="status"></p>
-        <p class="field-hint">Controls run through the load balancer's zone-pinned rule and need the API key when the node sets COWIN_API_KEY. A simulated failure auto-recovers after about 2 minutes even if Recover is never pressed.</p>
+        <p class="field-hint">Controls run through the load balancer's zone-pinned rule and need the API key when the node sets COWIN_API_KEY. A simulated failure auto-recovers after about 2 minutes even if Recover is never pressed. Only one zone can be down at a time: while one zone is degraded, the other zone's Stop is refused with a 409.</p>
         <h3 class="log-title">Event log</h3>
         <ul id="event-log" class="event-log"></ul>
       </aside>

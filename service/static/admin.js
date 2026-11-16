@@ -239,7 +239,7 @@
     const result = $('control-result');
     result.className = 'control-result';
     result.textContent = label + '...';
-    for (const id of ['btn-stop', 'btn-recover']) $(id).disabled = true;
+    for (const id of ['btn-stop', 'btn-recover', 'btn-stop-b', 'btn-recover-b']) $(id).disabled = true;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
@@ -273,7 +273,7 @@
       log(label + ': load balancer unreachable', 'log-bad');
     } finally {
       clearTimeout(timeout);
-      for (const id of ['btn-stop', 'btn-recover']) $(id).disabled = false;
+      for (const id of ['btn-stop', 'btn-recover', 'btn-stop-b', 'btn-recover-b']) $(id).disabled = false;
       poll();
     }
   }
@@ -297,6 +297,8 @@
   $('api-key').addEventListener('input', event => { apiKey = event.target.value; });
   $('btn-stop').addEventListener('click', () => control('a', 'fail', 'Stop Zone A'));
   $('btn-recover').addEventListener('click', () => control('a', 'recover', 'Recover Zone A'));
+  $('btn-stop-b').addEventListener('click', () => control('b', 'fail', 'Stop Zone B'));
+  $('btn-recover-b').addEventListener('click', () => control('b', 'recover', 'Recover Zone B'));
 
   poll();
   timer = setInterval(poll, POLL_MS);
