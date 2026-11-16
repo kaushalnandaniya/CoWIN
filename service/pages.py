@@ -228,7 +228,6 @@ def centers_page(data, filters):
 def metrics_page(data):
     limiter = data.get('rate_limit', {})
     store = data.get('store', {})
-    auth = data.get('auth', {})
     by_endpoint = data.get('requests_by_endpoint', {})
     by_status = data.get('responses_by_status', {})
     endpoint_rows = ''.join(
@@ -273,8 +272,6 @@ def metrics_page(data):
       {_kv([
         ('Store backend', store.get('backend', ''), False),
         ('Centers loaded', store.get('centers_loaded', ''), False),
-        ('API key required', 'Yes' if auth.get('enabled') else 'No', False),
-        ('Failed auth attempts', auth.get('failed_attempts', ''), False),
         ('Rate limiting', 'On' if limiter.get('enabled') else 'Off', False),
         ('Rejected requests', limiter.get('rejected_requests', 0), False),
         ('Rate limit', f"{limiter.get('requests_per_second', '')} req/s, "

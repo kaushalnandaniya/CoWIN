@@ -23,7 +23,7 @@ Production-readiness additions (still zero external dependencies):
 - Per-client-IP token-bucket rate limiting (RATE_LIMIT_RPS /
   RATE_LIMIT_BURST; 0 disables) with JSON 429s; /health and /metrics exempt
 - /metrics endpoint: uptime, zone health state, request/response counters,
-  store info, and auth/rate-limit counters for monitoring
+  store info, and rate-limit counters for monitoring
 - Readiness-aware /health: HTTP 200 only when the node can serve lookups
   (center store reachable, real dataset loaded). A dataset-load failure
   serves the fallback record but reports NOT READY so the ALB drains the
@@ -103,9 +103,9 @@ class ServiceConfig:
         self.zone = zone
         self.instance_id = instance_id or f"i-{socket.gethostname()[:8]}"
         # A blank configured key must not act like a real one: normalize it
-        # to "unconfigured" so the auth gate, the startup warning and
-        # /metrics agree. Previously an empty COWIN_API_KEY accepted a
-        # missing X-API-Key header while /metrics reported auth enabled.
+        # to "unconfigured" so the auth gate and the startup warning
+        # agree. Previously an empty COWIN_API_KEY accepted a
+        # missing X-API-Key header as if no key were configured.
         if api_key is not None and not str(api_key).strip():
             api_key = None
         self.api_key = api_key
@@ -146,7 +146,6 @@ class ServiceState:
         self.request_count = 0
         self.force_unhealthy = False
 
-        self.auth_failures = 0
         self.requests_by_endpoint = {}
         self.responses_by_status = {}
 
@@ -154,14 +153,6 @@ class ServiceState:
         with self._lock:
             self.request_count += 1
             return self.request_count
-
-    def record_auth_failure(self):
-        with self._lock:
-            self.auth_failures += 1
-
-    def auth_failure_count(self):
-        with self._lock:
-            return self.auth_failures
 
     def record_response(self, path, status_code):
         with self._lock:
@@ -748,7 +739,6 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get(AUTH_HEADER, "")
         if hmac.compare_digest(supplied, self.config.api_key):
             return True
-        self.state.record_auth_failure()
         logger.warning("Rejected %s %s from %s: missing or invalid API key",
                        self.command, self.path, self.client_address[0])
         self._write_json({
@@ -777,10 +767,6 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                 "centers_loaded": store_health["centers"],
                 "ready": store_health["ok"],
                 "detail": store_health["detail"],
-            },
-            "auth": {
-                "enabled": self.config.api_key is not None,
-                "failed_attempts": self.state.auth_failure_count(),
             },
             "rate_limit": {
                 "enabled": limiter.enabled,

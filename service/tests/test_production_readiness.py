@@ -243,14 +243,13 @@ class TestApiKeyAuth(LiveServerTestCase):
             status, _, _ = self.request(path)
             self.assertEqual(status, 200, path)
 
-    def test_failed_attempts_are_counted(self):
-        _, _, before = self.request("/metrics")
+    def test_rejected_requests_are_not_reported_as_metrics(self):
+        # Auth failures are logged, not counted: /metrics reports only
+        # counters that reflect real served functionality.
         self.request("/simulate/fail")  # 401
         self.request("/simulate/fail", headers={app.AUTH_HEADER: "nope"})  # 401
-        _, _, after = self.request("/metrics")
-        self.assertEqual(after["auth"]["enabled"], True)
-        self.assertEqual(after["auth"]["failed_attempts"],
-                         before["auth"]["failed_attempts"] + 2)
+        _, _, metrics = self.request("/metrics")
+        self.assertNotIn("auth", metrics)
 
 
 class TestDevModeAuth(LiveServerTestCase):
@@ -265,7 +264,8 @@ class TestDevModeAuth(LiveServerTestCase):
         status, _, _ = self.request("/simulate/recover")
         self.assertEqual(status, 200)
         _, _, body = self.request("/metrics")
-        self.assertEqual(body["auth"]["enabled"], False)
+        # No auth counters are reported; the endpoints simply work.
+        self.assertNotIn("auth", body)
 
 
 class TestRateLimiting(LiveServerTestCase):
@@ -351,7 +351,7 @@ class TestMetricsEndpoint(LiveServerTestCase):
         self.assertEqual(body["store"]["centers_loaded"], len(DATASET))
         self.assertIn("requests_by_endpoint", body)
         self.assertIn("responses_by_status", body)
-        self.assertIn("auth", body)
+        self.assertNotIn("auth", body)
         self.assertIn("rate_limit", body)
 
     def test_request_counters_track_traffic(self):
@@ -475,9 +475,9 @@ class TestBlankApiKeyBehavesAsDevMode(LiveServerTestCase):
         status, _, _ = self.request("/simulate/fail")
         self.assertEqual(status, 200)
 
-    def test_metrics_agrees_auth_is_disabled(self):
+    def test_metrics_report_no_auth_counters(self):
         _, _, body = self.request("/metrics")
-        self.assertEqual(body["auth"]["enabled"], False)
+        self.assertNotIn("auth", body)
 
 
 class TestTightenedValidation(LiveServerTestCase):
