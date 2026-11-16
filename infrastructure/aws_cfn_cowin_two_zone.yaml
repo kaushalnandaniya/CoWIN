@@ -33,23 +33,21 @@ Parameters:
     Type: String
     Default: 10.0.1.150
     Description: >
-      Static private IP for the Zone A node. Pinned so the peer zone's
-      COWIN_PEER_URL never has to resolve the other instance at boot
-      (which would create a mutual resource dependency). REPLACEMENT
-      RULE: an update that replaces this instance (UserData, KeyName,
-      AMI or this parameter changing) creates the new instance before
-      deleting the old one, and creation fails if the old instance
-      still owns this address. Before such an update, either set this
-      parameter to a fresh free address in 10.0.1.0/24 or terminate the
-      old Zone A instance first. The default is a deliberately high
-      address; verify it is free before deploying.
+      Free static address in 10.0.1.0/24 for logical Zone A. UPDATE RULE:
+      bootstrap/IP changes replace BOTH nodes via launch-template versions.
+      Supply fresh free addresses for BOTH ZoneAPrivateIp and ZoneBPrivateIp
+      before any replacing update, including migration from the old template,
+      AppRepoRef/UserData, KeyName or AMI updates. CloudFormation creates new
+      nodes before deleting old ones; reusing occupied addresses fails.
+      Reinstall the API key over SSH on BOTH replacement nodes. See runbook.
 
   ZoneBPrivateIp:
     Type: String
     Default: 10.0.2.150
     Description: >
-      Static private IP for the Zone B node. Same REPLACEMENT RULE as
-      ZoneAPrivateIp, for subnet 10.0.2.0/24.
+      Free static address in 10.0.2.0/24 for logical Zone B. Follow the SAME
+      BOTH-node replacement/update rule as ZoneAPrivateIp. A one-IP-only
+      update is unsafe: the other replacement would reuse an occupied IP.
 
   AppRepoRef:
     Type: String
@@ -302,72 +300,83 @@ Resources:
           Value: CoWIN-Lookup-ZoneA
         - Key: Zone
           Value: Zone-A
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          yum update -y
-          yum install -y python3
-          mkdir -p /opt/cowin/static
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BootstrapZoneA
+        Version: !GetAtt BootstrapZoneA.LatestVersionNumber
 
-          # Fetch the pinned application artifact (service code, dataset, UI assets)
-          # instead of embedding drifting copies in this template.
-          BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
-          fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
-          fetch "$BASE_URL/app.py" /opt/cowin/app.py
-          fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
-          fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
-          for asset in index.html styles.css app.js admin.html admin.css admin.js; do
-            fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
-          done
+  # A new version forces EC2 replacement, so cloud-init actually reruns.
+  BootstrapZoneA:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            # Network identity: A=${ZoneAPrivateIp} B=${ZoneBPrivateIp}
+            yum update -y
+            yum install -y python3
+            mkdir -p /opt/cowin/static
 
-          # Get IMDSv2 token & instance metadata
-          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+            # Fetch the pinned application artifact (service code, dataset, UI assets)
+            # instead of embedding drifting copies in this template.
+            BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
+            fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
+            fetch "$BASE_URL/app.py" /opt/cowin/app.py
+            fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
+            fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
+            for asset in index.html styles.css app.js admin.html admin.css admin.js; do
+              fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
+            done
 
-          cat << EOF > /etc/systemd/system/cowin.service
-          [Unit]
-          Description=CoWIN Lookup Microservice
-          After=network.target
+            # Get IMDSv2 token & instance metadata
+            TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
-          [Service]
-          Type=simple
-          Environment="AWS_AZ=$AZ"
-          Environment="AWS_INSTANCE_ID=$IID"
-          EnvironmentFile=-/etc/default/cowin-lookup
-          ExecStart=/usr/bin/python3 /opt/cowin/app.py
-          Restart=always
-          RestartSec=3
+            cat << EOF > /etc/systemd/system/cowin.service
+            [Unit]
+            Description=CoWIN Lookup Microservice
+            After=network.target
 
-          [Install]
-          WantedBy=multi-user.target
-          EOF
+            [Service]
+            Type=simple
+            Environment="AWS_AZ=$AZ"
+            Environment="AWS_INSTANCE_ID=$IID"
+            EnvironmentFile=-/etc/default/cowin-lookup
+            ExecStart=/usr/bin/python3 /opt/cowin/app.py
+            Restart=always
+            RestartSec=3
 
-          mkdir -p /etc/default
-          cat << 'CONF' > /etc/default/cowin-lookup
-          # Service configuration (see service/README.md).
-          # COWIN_API_KEY is deliberately NOT written here: UserData is
-          # readable via the console/describe-instances, so the operator
-          # sets the key over SSH after boot instead (see the operator
-          # runbook in service/README.md). Until then the node runs in
-          # dev mode; /simulate/* stays unreachable anyway behind the
-          # ALB's 403 and the scoped security group.
-          #COWIN_API_KEY=set-me-over-ssh
-          # Cross-zone interlock: refuse /simulate/fail while the peer
-          # zone is unhealthy or unreachable. Points at the peer node's
-          # pinned private IP, so there is no boot-time dependency
-          # between the two instances.
-          COWIN_PEER_URL=http://${ZoneBPrivateIp}:8080
-          # Per-client-IP rate limiting (0 = disabled):
-          #RATE_LIMIT_RPS=50
-          #RATE_LIMIT_BURST=100
-          #CENTERS_DB_FILE=/opt/cowin/centers.db
-          CONF
+            [Install]
+            WantedBy=multi-user.target
+            EOF
 
-          systemctl daemon-reload
-          systemctl enable cowin
-          systemctl start cowin
+            mkdir -p /etc/default
+            cat << 'CONF' > /etc/default/cowin-lookup
+            # Service configuration (see service/README.md).
+            # COWIN_API_KEY is deliberately NOT written here: UserData is
+            # readable via the console/describe-instances, so the operator
+            # sets the key over SSH after boot instead (see the operator
+            # runbook in service/README.md). Until then the node runs in
+            # dev mode; /simulate/* stays unreachable anyway behind the
+            # ALB's 403 and the scoped security group.
+            #COWIN_API_KEY=set-me-over-ssh
+            COWIN_ZONE_LETTER=a
+            # Cross-zone interlock: refuse /simulate/fail while the peer
+            # zone is unhealthy or unreachable. Points at the peer node's
+            # pinned private IP, so there is no boot-time dependency
+            # between the two instances.
+            COWIN_PEER_URL=http://${ZoneBPrivateIp}:8080
+            # Per-client-IP rate limiting (0 = disabled):
+            #RATE_LIMIT_RPS=50
+            #RATE_LIMIT_BURST=100
+            #CENTERS_DB_FILE=/opt/cowin/centers.db
+            CONF
+
+            systemctl daemon-reload
+            systemctl enable cowin
+            systemctl start cowin
 
   InstanceZoneB:
     Type: AWS::EC2::Instance
@@ -384,67 +393,78 @@ Resources:
           Value: CoWIN-Lookup-ZoneB
         - Key: Zone
           Value: Zone-B
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          yum update -y
-          yum install -y python3
-          mkdir -p /opt/cowin/static
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BootstrapZoneB
+        Version: !GetAtt BootstrapZoneB.LatestVersionNumber
 
-          # Fetch the pinned application artifact (service code, dataset, UI assets)
-          # instead of embedding drifting copies in this template.
-          BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
-          fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
-          fetch "$BASE_URL/app.py" /opt/cowin/app.py
-          fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
-          fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
-          for asset in index.html styles.css app.js admin.html admin.css admin.js; do
-            fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
-          done
+  # A new version forces EC2 replacement, so cloud-init actually reruns.
+  BootstrapZoneB:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            # Network identity: A=${ZoneAPrivateIp} B=${ZoneBPrivateIp}
+            yum update -y
+            yum install -y python3
+            mkdir -p /opt/cowin/static
 
-          # Get IMDSv2 token & instance metadata
-          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+            # Fetch the pinned application artifact (service code, dataset, UI assets)
+            # instead of embedding drifting copies in this template.
+            BASE_URL="https://raw.githubusercontent.com/${AppRepoOwner}/${AppRepoName}/${AppRepoRef}/service"
+            fetch() { curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "$2"; }
+            fetch "$BASE_URL/app.py" /opt/cowin/app.py
+            fetch "$BASE_URL/pages.py" /opt/cowin/pages.py
+            fetch "$BASE_URL/centers_data.json" /opt/cowin/centers_data.json
+            for asset in index.html styles.css app.js admin.html admin.css admin.js; do
+              fetch "$BASE_URL/static/$asset" "/opt/cowin/static/$asset"
+            done
 
-          cat << EOF > /etc/systemd/system/cowin.service
-          [Unit]
-          Description=CoWIN Lookup Microservice
-          After=network.target
+            # Get IMDSv2 token & instance metadata
+            TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
-          [Service]
-          Type=simple
-          Environment="AWS_AZ=$AZ"
-          Environment="AWS_INSTANCE_ID=$IID"
-          EnvironmentFile=-/etc/default/cowin-lookup
-          ExecStart=/usr/bin/python3 /opt/cowin/app.py
-          Restart=always
-          RestartSec=3
+            cat << EOF > /etc/systemd/system/cowin.service
+            [Unit]
+            Description=CoWIN Lookup Microservice
+            After=network.target
 
-          [Install]
-          WantedBy=multi-user.target
-          EOF
+            [Service]
+            Type=simple
+            Environment="AWS_AZ=$AZ"
+            Environment="AWS_INSTANCE_ID=$IID"
+            EnvironmentFile=-/etc/default/cowin-lookup
+            ExecStart=/usr/bin/python3 /opt/cowin/app.py
+            Restart=always
+            RestartSec=3
 
-          mkdir -p /etc/default
-          cat << 'CONF' > /etc/default/cowin-lookup
-          # Service configuration (see service/README.md).
-          # COWIN_API_KEY is deliberately NOT written here: the operator
-          # sets it over SSH after boot (see the Zone A UserData comment
-          # and the operator runbook in service/README.md).
-          #COWIN_API_KEY=set-me-over-ssh
-          # Cross-zone interlock: refuse /simulate/fail while the peer
-          # zone is unhealthy or unreachable (peer's pinned private IP).
-          COWIN_PEER_URL=http://${ZoneAPrivateIp}:8080
-          # Per-client-IP rate limiting (0 = disabled):
-          #RATE_LIMIT_RPS=50
-          #RATE_LIMIT_BURST=100
-          #CENTERS_DB_FILE=/opt/cowin/centers.db
-          CONF
+            [Install]
+            WantedBy=multi-user.target
+            EOF
 
-          systemctl daemon-reload
-          systemctl enable cowin
-          systemctl start cowin
+            mkdir -p /etc/default
+            cat << 'CONF' > /etc/default/cowin-lookup
+            # Service configuration (see service/README.md).
+            # COWIN_API_KEY is deliberately NOT written here: the operator
+            # sets it over SSH after boot (see the Zone A UserData comment
+            # and the operator runbook in service/README.md).
+            #COWIN_API_KEY=set-me-over-ssh
+            COWIN_ZONE_LETTER=b
+            # Cross-zone interlock: refuse /simulate/fail while the peer
+            # zone is unhealthy or unreachable (peer's pinned private IP).
+            COWIN_PEER_URL=http://${ZoneAPrivateIp}:8080
+            # Per-client-IP rate limiting (0 = disabled):
+            #RATE_LIMIT_RPS=50
+            #RATE_LIMIT_BURST=100
+            #CENTERS_DB_FILE=/opt/cowin/centers.db
+            CONF
+
+            systemctl daemon-reload
+            systemctl enable cowin
+            systemctl start cowin
 
 Outputs:
   VPCId:
