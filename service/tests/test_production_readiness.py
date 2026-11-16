@@ -20,11 +20,14 @@ or directly:
 
 import json
 import os
+import socket
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -506,7 +509,7 @@ class TestTightenedValidation(LiveServerTestCase):
 class TestZonePinnedSimulate(LiveServerTestCase):
     """Zone-qualified /simulate/zone-<letter>/* commands.
 
-    The load balancer routes these to a single-zone target group; the node
+    The panel sends these directly through per-node tunnels; the node
     double-checks the letter so a misrouted command can never flip the
     wrong zone. The test zone is test-zone-1a, i.e. letter 'a'.
     """
@@ -723,14 +726,17 @@ class TestSimulateFailRace(unittest.TestCase):
                 pass
             stop_test_server(server[0], server[1])
 
-    def _post(self, base, path, results, slot, barrier):
-        barrier.wait()
-        req = urllib.request.Request(base + path, method="POST")
+    def _post(self, base, path, results, errors, slot, barrier):
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                results[slot] = resp.status
-        except urllib.error.HTTPError as e:
-            results[slot] = e.code
+            barrier.wait(timeout=5)
+            req = urllib.request.Request(base + path, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    results[slot] = resp.status
+            except urllib.error.HTTPError as e:
+                results[slot] = e.code
+        except Exception as error:
+            errors[slot] = repr(error)
 
     def _health(self, base):
         try:
@@ -742,19 +748,22 @@ class TestSimulateFailRace(unittest.TestCase):
     def test_simultaneous_fail_never_takes_both_zones_down(self):
         for _ in range(self.ROUNDS):
             results = [None, None]
+            errors = [None, None]
             barrier = threading.Barrier(2)
             threads = [
                 threading.Thread(target=self._post,
                                  args=(self.a[2], "/simulate/fail",
-                                       results, 0, barrier)),
+                                       results, errors, 0, barrier)),
                 threading.Thread(target=self._post,
                                  args=(self.b[2], "/simulate/fail",
-                                       results, 1, barrier)),
+                                       results, errors, 1, barrier)),
             ]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
+            self.assertEqual(errors, [None, None])
+            self.assertTrue(all(status in (200, 409) for status in results), results)
             # Never both accepted...
             self.assertNotEqual(results, [200, 200],
                                 "both zones accepted simultaneous fail")
@@ -785,6 +794,191 @@ class TestSimulateFailRace(unittest.TestCase):
                 return resp.status
         except urllib.error.HTTPError as e:
             return e.code
+
+
+class TestSimulateSynchronization(unittest.TestCase):
+    """Forced interleavings, separate from the probabilistic two-node race."""
+
+    def _post(self, base, action="fail"):
+        req = urllib.request.Request(base + "/simulate/" + action, method="POST",
+                                     headers={app.AUTH_HEADER: TEST_API_KEY})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            error.read()
+            return error.code
+
+    def test_disconnected_refusal_rolls_back_before_response(self):
+        a = start_test_server(api_key=TEST_API_KEY, auto_recover_seconds=30)
+        b = start_test_server(api_key=TEST_API_KEY, auto_recover_seconds=.1)
+        a[0].config.peer_url = b[2]
+        b[0].config.peer_url = a[2]
+        entered, release = threading.Event(), threading.Event()
+        original = app.CoWINLookupHandler._peer_allows_failure
+
+        def delayed_probe(handler):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release peer probe")
+            return original(handler)
+
+        client = None
+        try:
+            self.assertEqual(self._post(a[2]), 200)
+            with patch.object(app.CoWINLookupHandler, "_peer_allows_failure", delayed_probe):
+                client = socket.create_connection(b[0].server_address, timeout=5)
+                client.sendall(("POST /simulate/fail HTTP/1.1\r\nHost: localhost\r\n"
+                                "X-API-Key: " + TEST_API_KEY +
+                                "\r\nContent-Length: 0\r\n\r\n").encode())
+                self.assertTrue(entered.wait(5))
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                  struct.pack("ii", 1, 0))
+                client.close()
+                release.set()
+                # The pending request owns this lock until decision cleanup.
+                with b[0].simulate_lock:
+                    self.assertFalse(b[0].state.is_unhealthy())
+                    self.assertIsNone(b[0].auto_recover_timer)
+            self.assertTrue(a[0].state.is_unhealthy())
+            with urllib.request.urlopen(b[2] + "/health", timeout=5) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            release.set()
+            if client is not None:
+                client.close()
+            for server, thread, _ in (a, b):
+                stop_test_server(server, thread)
+
+    def test_two_local_requests_cannot_both_accept_or_rearm(self):
+        class ContendedLock:
+            # Both handlers must arrive before either enters the lock.
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.barrier = threading.Barrier(2)
+                self.entries = 0
+                self.meta = threading.Lock()
+
+            def __enter__(self):
+                with self.meta:
+                    self.entries += 1
+                    entry = self.entries
+                if entry <= 2:
+                    self.barrier.wait(timeout=5)
+                self.lock.acquire()
+
+            def __exit__(self, *args):
+                self.lock.release()
+
+        server, thread, base = start_test_server(api_key=TEST_API_KEY,
+                                                auto_recover_seconds=30)
+        server.simulate_lock = ContendedLock()
+        results, errors = [], []
+        def worker():
+            try:
+                results.append(self._post(base))
+            except Exception as error:
+                errors.append(repr(error))
+        try:
+            workers = [threading.Thread(target=worker) for _ in range(2)]
+            for worker_thread in workers:
+                worker_thread.start()
+            for worker_thread in workers:
+                worker_thread.join(timeout=10)
+                self.assertFalse(worker_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(sorted(results), [200, 409])
+            timer = server.auto_recover_timer
+            self.assertIsNotNone(timer)
+            self.assertEqual(self._post(base), 409)
+            self.assertIs(server.auto_recover_timer, timer)
+        finally:
+            stop_test_server(server, thread)
+
+    def test_recover_waits_for_pending_fail_decision(self):
+        server, thread, base = start_test_server(api_key=TEST_API_KEY)
+        entered, release, recovered = (threading.Event() for _ in range(3))
+        results, errors = {}, []
+        def delayed_probe(handler):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release probe")
+            return True
+        def worker(action):
+            try:
+                results[action] = self._post(base, action)
+            except Exception as error:
+                errors.append(repr(error))
+            finally:
+                if action == "recover":
+                    recovered.set()
+        fail = threading.Thread(target=worker, args=("fail",))
+        recover = threading.Thread(target=worker, args=("recover",))
+        try:
+            with patch.object(app.CoWINLookupHandler, "_peer_allows_failure", delayed_probe):
+                fail.start()
+                self.assertTrue(entered.wait(5))
+                recover.start()
+                self.assertFalse(recovered.wait(.1))
+                release.set()
+                for worker_thread in (fail, recover):
+                    worker_thread.join(timeout=10)
+                    self.assertFalse(worker_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(results, {"fail": 200, "recover": 200})
+            self.assertFalse(server.state.is_unhealthy())
+            self.assertIsNone(server.auto_recover_timer)
+        finally:
+            release.set()
+            for worker_thread in (fail, recover):
+                if worker_thread.ident is not None:
+                    worker_thread.join(timeout=10)
+            stop_test_server(server, thread)
+
+    def test_stale_timer_cannot_recover_a_new_drill(self):
+        server, thread, base = start_test_server(api_key=TEST_API_KEY,
+                                                auto_recover_seconds=30)
+        try:
+            self.assertEqual(self._post(base), 200)
+            old_timer = server.auto_recover_timer
+            self.assertEqual(self._post(base, "recover"), 200)
+            self.assertEqual(self._post(base), 200)
+            current_timer = server.auto_recover_timer
+            # Simulate a cancelled callback already dispatched but stalled.
+            old_timer.function()
+            self.assertTrue(server.state.is_unhealthy())
+            self.assertIs(server.auto_recover_timer, current_timer)
+            current_timer.function()
+            self.assertFalse(server.state.is_unhealthy())
+            self.assertIsNone(server.auto_recover_timer)
+            current_timer.cancel()
+        finally:
+            stop_test_server(server, thread)
+
+    def test_probe_exception_does_not_leave_intent_or_timer(self):
+        server, thread, base = start_test_server(api_key=TEST_API_KEY)
+        try:
+            with patch.object(app.CoWINLookupHandler, "_peer_allows_failure",
+                              side_effect=RuntimeError("injected probe failure")):
+                self.assertEqual(self._post(base), 500)
+            self.assertFalse(server.state.is_unhealthy())
+            self.assertIsNone(server.auto_recover_timer)
+        finally:
+            stop_test_server(server, thread)
+
+
+class TestLogicalZoneLetter(LiveServerTestCase):
+    server_kwargs = {"zone": "ap-south-1c", "zone_letter": "b"}
+
+    def test_logical_b_in_physical_c(self):
+        try:
+            status, _, body = self.request("/simulate/zone-b/fail", method="POST")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["zone"], "ap-south-1c")
+            status, _, _ = self.request("/simulate/zone-a/recover", method="POST")
+            self.assertEqual(status, 409)
+        finally:
+            self.request("/simulate/zone-b/recover", method="POST")
 
 
 if __name__ == "__main__":

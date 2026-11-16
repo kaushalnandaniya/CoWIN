@@ -86,8 +86,8 @@ def parse_simulate_path(path):
     '/simulate/zone-a/recover'    -> ('recover', 'a')
     anything else                 -> (None, None)
 
-    The zone-qualified form is what the load balancer's zone-pinned
-    listener rules forward; the node verifies the letter against its own
+    The panel sends zone-qualified commands through node SSH tunnels.
+    The node verifies the letter against its own
     configured zone so a misrouted command can never flip the wrong zone.
     """
     parts = path.strip("/").split("/")
@@ -846,15 +846,11 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             self._simulate_recover()
 
     def _peer_allows_failure(self):
-        """Safety interlock: refuse to fail while the peer zone is down.
+        """Return a decision only, without writing to the client socket.
 
-        Returns True when the simulated failure may proceed; otherwise
-        writes the JSON 409 and returns False. With no COWIN_PEER_URL
-        configured (single-node dev setups) the check is skipped. An
-        unreachable peer counts as unhealthy: never degrade the second
-        zone while the first may already be down for real. Called from
-        _simulate_fail while holding the node's simulate_lock, after
-        the intent mark, so a racing peer sees this node failing.
+        Called with simulate_lock held and our intent already visible to
+        peer health probes. An unreachable peer is a refusal. Cleanup of
+        local intent must finish before any HTTP response is attempted.
         """
         peer = self.config.peer_url
         if not peer:
@@ -863,92 +859,88 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             req = urllib.request.Request(peer + "/health",
                                          headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=1.5) as resp:
-                peer_healthy = resp.status == 200
-        except urllib.error.HTTPError:
-            peer_healthy = False  # answering, but failing health checks
+                return resp.status == 200
         except Exception:
-            peer_healthy = False  # unreachable: real outage or stopped
-        if peer_healthy:
-            return True
-        logger.warning(
-            "Refused simulated failure: peer zone at %s is not healthy", peer)
-        self._write_json({
-            "error": "Conflict",
-            "message": ("The other zone is not healthy; refusing to "
-                        "degrade a second zone."),
-            "zone": self.config.zone
-        }, status_code=409)
-        return False
+            return False
 
     def _schedule_auto_recover(self):
-        """Bound the disruption: restore health automatically after the
-        configured delay, even if nobody calls /simulate/recover."""
+        """Arm one timer. Caller holds simulate_lock."""
+        self._cancel_auto_recover()
         seconds = self.config.auto_recover_seconds
         if seconds <= 0:
             return
-        self._cancel_auto_recover()
+        generation = self.server.auto_recover_generation
 
         def _auto_recover():
-            self.state.set_unhealthy(False)
-            logger.info("Simulated failure auto-recovered after %.0fs - "
-                        "/health restored to 200", seconds)
+            with self.server.simulate_lock:
+                # cancel() cannot stop a callback that has already begun.
+                # A stale callback must not recover a newer drill.
+                if generation != self.server.auto_recover_generation:
+                    return
+                self.server.auto_recover_timer = None
+                self.state.set_unhealthy(False)
+            logger.info("Simulated failure auto-recovered after %.0fs", seconds)
 
         timer = threading.Timer(seconds, _auto_recover)
         timer.daemon = True
-        timer.start()
         self.server.auto_recover_timer = timer
+        timer.start()
 
     def _cancel_auto_recover(self):
-        timer = getattr(self.server, "auto_recover_timer", None)
+        """Invalidate even an already-running callback. Caller holds lock."""
+        self.server.auto_recover_generation += 1
+        timer = self.server.auto_recover_timer
+        self.server.auto_recover_timer = None
         if timer is not None:
             timer.cancel()
-            self.server.auto_recover_timer = None
 
     def _simulate_fail(self):
-        if self.state.is_unhealthy():
-            # Already in simulated failure. Refuse rather than re-arm:
-            # re-arming the auto-recover timer on every fail would let a
-            # key holder extend the degradation indefinitely. One accepted
-            # fail = one bounded window, ended by the timer or Recover.
-            logger.warning("Refused simulated failure: already active on "
-                           "this node (no timer re-arm)")
-            self._write_json({
-                "error": "Conflict",
-                "message": ("A simulated failure is already active on this "
-                            "node; it ends at the auto-recover deadline or "
-                            "via /simulate/recover."),
-                "zone": self.config.zone,
-                "status": "unhealthy"
-            }, status_code=409)
-            return
-        # Intent-first check-and-set, safe against simultaneous
-        # fail commands on both nodes: mark our own failure BEFORE
-        # consulting the peer. A peer whose health read observed us
-        # healthy finished that read before our mark, so its own
-        # read of us happens after our mark (program order) and
-        # must see us failing - it backs off with a 409. If we are
-        # the one who sees the peer failing, we roll back our
-        # intent and refuse. At most one node stays failed; in the
-        # worst interleaving both refuse and neither goes down.
         with self.server.simulate_lock:
-            self.state.set_unhealthy(True)
-            if not self._peer_allows_failure():
-                self.state.set_unhealthy(False)  # lost the race: undo
-                return
-            self._schedule_auto_recover()
-        logger.warning("Simulated failure ENABLED - /health now returns 500")
-        self._write_json({
-            "message": "Health check now returning 500",
-            "zone": self.config.zone,
-            "status": "unhealthy",
-            "auto_recover_in_seconds": (self.config.auto_recover_seconds
-                                        if self.config.auto_recover_seconds > 0
-                                        else None)
-        })
+            if self.state.is_unhealthy():
+                status = 409
+                body = {
+                    "error": "Conflict",
+                    "message": "A simulated failure is already active (no timer re-arm).",
+                    "zone": self.config.zone,
+                    "status": "unhealthy",
+                }
+            else:
+                # Intent is visible to the peer before our probe. Keep all
+                # local fail/recover/timer transitions under this lock.
+                accepted = False
+                self.state.set_unhealthy(True)
+                try:
+                    if self._peer_allows_failure():
+                        self._schedule_auto_recover()
+                        accepted = True
+                finally:
+                    if not accepted:
+                        self._cancel_auto_recover()
+                        self.state.set_unhealthy(False)
+                if accepted:
+                    status = 200
+                    body = {
+                        "message": "Health check now returning 500",
+                        "zone": self.config.zone,
+                        "status": "unhealthy",
+                        "auto_recover_in_seconds": (
+                            self.config.auto_recover_seconds
+                            if self.config.auto_recover_seconds > 0 else None),
+                    }
+                else:
+                    status = 409
+                    body = {
+                        "error": "Conflict",
+                        "message": "The other zone is not healthy; refusing to degrade a second zone.",
+                        "zone": self.config.zone,
+                    }
+        # Socket failure here cannot prevent rollback or timer creation.
+        self._write_json(body, status_code=status)
 
     def _simulate_recover(self):
-        self._cancel_auto_recover()
-        self.state.set_unhealthy(False)
+        with self.server.simulate_lock:
+            self._cancel_auto_recover()
+            self.state.set_unhealthy(False)
         logger.info("Simulated failure cleared - /health restored to 200")
         self._write_json({
             "message": "Health check restored to 200",
@@ -972,6 +964,7 @@ class CoWINHTTPServer(ThreadingHTTPServer):
         self.rate_limiter = RateLimiter(config.rate_limit_rps,
                                         config.rate_limit_burst)
         self.auto_recover_timer = None
+        self.auto_recover_generation = 0
         # Serializes simulated fail/recover on this node so the
         # intent-then-verify sequence in _simulate_fail is atomic
         # against local concurrent requests.
@@ -979,6 +972,11 @@ class CoWINHTTPServer(ThreadingHTTPServer):
         super().__init__((config.host, config.port), CoWINLookupHandler)
 
     def server_close(self):
+        with self.simulate_lock:
+            self.auto_recover_generation += 1
+            if self.auto_recover_timer is not None:
+                self.auto_recover_timer.cancel()
+                self.auto_recover_timer = None
         super().server_close()
         self.store.close()
 
