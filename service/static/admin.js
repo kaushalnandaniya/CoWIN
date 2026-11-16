@@ -256,15 +256,17 @@
         result.textContent = label + ': command accepted.';
         result.classList.add('ok');
         log(label + ': command accepted by Zone ' + zoneLetter.toUpperCase(), 'log-ok');
-        if (action === 'fail') log('Auto-recover is armed: the zone restores itself after about 2 minutes even without Recover', 'log-ok');
+        if (action === 'fail') log('Failure accepted; check the configured auto-recover window (default 120 seconds)', 'log-ok');
       } else if (response.status === 401) {
         result.textContent = label + ': rejected - the API key is missing or wrong.';
         result.classList.add('err');
         log(label + ': 401 unauthorized (check the API key)', 'log-bad');
       } else if (response.status === 409) {
-        result.textContent = label + ': refused - the other zone is not healthy.';
+        let detail = 'conflict (check the zone, active drill, and peer health)';
+        try { detail = (await response.json()).message || detail; } catch (error) { /* keep fallback */ }
+        result.textContent = label + ': refused - ' + detail;
         result.classList.add('err');
-        log(label + ': 409 refused (safety interlock)', 'log-bad');
+        log(label + ': 409 refused - ' + detail, 'log-bad');
       } else {
         result.textContent = `${label}: HTTP ${response.status}.`;
         result.classList.add('err');

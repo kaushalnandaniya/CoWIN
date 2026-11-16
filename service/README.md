@@ -35,8 +35,9 @@ from the original file-backed version.
   zone is unhealthy (peer state read from `COWIN_PEER_URL`; an
   unreachable peer also refuses). The interlock is intent-first with
   rollback: a node marks its own failure before consulting the peer, so
-  two simultaneous `fail` commands can never leave both zones down - the
-  loser gets a `409`, and a dead heat refuses both. A simulated failure
+  two `fail` requests without intervening recovery cannot both be accepted.
+  One or both are refused. Local fail/recover/timer transitions are serialized;
+  a rejected intent is rolled back before a response is written. A simulated failure
   auto-recovers after `COWIN_SIM_AUTO_RECOVER_SECONDS`
   (default 120) even if nobody recovers it.
 
@@ -64,7 +65,7 @@ off) keep local demos and the 10 req/s failover benchmark working.
 installs an equivalent unit (`cowin.service`) with `Restart=always`, so the
 service comes back automatically after a crash or reboot. Optional
 configuration lives in `/etc/default/cowin-lookup` (created by the bootstrap
-with the required `COWIN_API_KEY` and commented examples).
+with peer/zone configuration and commented examples; the operator adds the key).
 
 ## Read-only deployment verification
 
@@ -109,23 +110,41 @@ panel ITSELF through a tunnel - the page code must not come over the
 public HTTP path either:
 
 ```bash
-ssh -L 8081:localhost:8080 ec2-user@<zone A public IP>
-ssh -L 8082:localhost:8080 ec2-user@<zone B public IP>
-# then open http://localhost:8081/admin/ and set endpoint B to http://localhost:8082
+# Terminal 1: replace <ALB DNS name> with the stack LoadBalancerDNSName output.
+# Two forwards over node A: ALB on 8080, node A on 8081.
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:8080:<ALB DNS name>:80 \
+  -L 127.0.0.1:8081:localhost:8080 ec2-user@<zone A public IP>
+# Terminal 2: node B on 8082.
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:8082:localhost:8080 ec2-user@<zone B public IP>
+# Open http://localhost:8081/admin/
+# Apply endpoints: ALB=http://localhost:8080 A=http://localhost:8081 B=http://localhost:8082
 ```
 
-Everything the browser sends - page load, health polls, the API key -
-now travels inside SSH. The endpoint A field already matches the
-panel's own origin; endpoint B is cross-origin loopback, which the
-node's CORS headers allow. When the node runs with `COWIN_API_KEY`, type
-the key into the page; it is sent as the `X-API-Key` header and kept only
-in memory. A simulated failure auto-recovers after about 2 minutes even
-if Recover is never pressed (repeating Stop while a failure is active is
-refused - the window cannot be extended), and while one zone is degraded
-the other zone's Stop is refused with a 409. Endpoint addresses default
-to the local simulator topology from `benchmark/run_experiment.sh`
-(localhost 8080/8081/8082) and can be changed in the page or via
-`?alb=&a=&b=` query parameters.
+Use `-i <private-key-file>` if the EC2 key is not already in your SSH agent.
+All three browser endpoints are loopback forwards. The page, node health
+polls, ALB health polls and API-key control requests cross the browser-to-AWS
+hop inside SSH. On AWS, the ALB forward and peer health probes use HTTP;
+this is not end-to-end TLS. The API key goes only to the selected node,
+not the ALB. Keep both SSH sessions running during the drill.
+
+When `COWIN_API_KEY` is set, type the key into the panel; it is sent as
+`X-API-Key` and is not persisted by the page. Endpoint addresses are saved
+in localStorage and may also be set with `?alb=&a=&b=`. **Check all endpoint
+fields before entering the key**: the page permits arbitrary URLs and does
+not enforce loopback-only destinations. Never load the panel over public
+HTTP or point a node control endpoint at a public HTTP URL. CORS allows
+the loopback panel to control the other loopback node port.
+
+With the default finite 120-second setting, an accepted failure gets one
+auto-recover timer. Concurrent duplicate Stop requests on the same node
+are refused and do not replace that timer. A refused peer check, including
+a disconnected client, leaves no failure intent behind. A process restart
+clears simulated state. These are process-local controls, not an AWS-wide
+availability guarantee. Timer execution can be delayed if the process is
+stalled; `0` explicitly disables auto-recovery. The panel's Stop/Recover
+buttons do not stop/start EC2 instances.
 
 ## Operator runbook and limits (live deployment)
 
@@ -136,23 +155,78 @@ steps after a deploy):
 
 ```bash
 # pick a 16+ char key, keep it in a password manager - never in chat
-echo 'COWIN_API_KEY=<the key>' | sudo tee -a /etc/default/cowin-lookup
-sudo systemctl restart cowin   # on BOTH nodes
+# Run on BOTH nodes. Use 16+ ASCII letters/digits/-/_ (no spaces/quotes).
+# read avoids placing the key in shell history; tee output is suppressed.
+sudo chmod 600 /etc/default/cowin-lookup
+read -rsp 'Drill key: ' COWIN_API_KEY; printf '\n'
+printf 'COWIN_API_KEY=%s\n' "$COWIN_API_KEY" | sudo tee -a /etc/default/cowin-lookup >/dev/null
+unset COWIN_API_KEY
+sudo systemctl restart cowin
 ```
 
 Operator access itself comes from the `OperatorKeyPair` (an existing EC2
 key pair) plus port 22 scoped to a single `/32` (`OperatorSshCidr`) in
 the template. Explicit limits for anyone holding the key:
 
-- Drill one zone at a time; the interlock refuses a second zone anyway.
-- Each accepted failure lasts at most `COWIN_SIM_AUTO_RECOVER_SECONDS`
-  (default 120 s) and halves capacity for that window; a repeated Stop
+- Drill one zone at a time. Do not race Recover against a different zone's
+  Stop; the peer-health check is not a distributed transaction.
+- Each accepted failure arms `COWIN_SIM_AUTO_RECOVER_SECONDS`
+  (default 120 s) and halves capacity until recovery; a repeated Stop
   while a failure is active is refused with 409, so the window cannot
   be extended by spamming the button.
 - The key only ever travels inside the SSH tunnel; never paste it into
   chat, tickets or the public site.
-- When the demo is done, stop the instances; there is no ALB surface to
-  unwind.
+- When the demo is done, close tunnels and stop instances as approved.
+  The ALB still exists and remains billable until the stack is deleted.
+
+### Stack updates and pinned-IP replacement
+
+The instance bootstraps now live in two EC2 launch templates. Each instance
+references its template's explicit `LatestVersionNumber`; CloudFormation
+replaces the instance when that version changes. Both bootstraps include
+both private-IP parameters, so changing either IP changes **both** versions
+and replaces **both** nodes. Both fresh nodes run cloud-init with current
+peer URLs. There is no old surviving node with a stale peer configuration.
+Changing AppRepoRef or bootstrap code similarly installs a fresh artifact
+through replacement instead of relying on a restart to rerun UserData.
+
+For EBS-backed instances, a direct EC2 `UserData` update only restarts the
+instance; first-boot shell scripts do not automatically rerun. That is why
+this template uses launch-template-version replacement instead.
+
+Before a replacing update (including migration from the pre-launch-template
+PR template, bootstrap/AppRepoRef changes, key-pair or AMI changes):
+
+1. Obtain authorization and schedule a maintenance window. This design does
+   not guarantee a rolling or outage-free update. Do not run drills during it.
+2. Choose **two fresh, free** private IPs, one in `10.0.1.0/24`, the other in
+   `10.0.2.0/24`. Check EC2 network-interface allocations, including old stack
+   instances. Avoid subnet-reserved addresses. Do not reuse occupied IPs.
+3. Review a CloudFormation change set with **both** `ZoneAPrivateIp` and
+   `ZoneBPrivateIp` set to the new values. Confirm replacement of both nodes,
+   current AppRepoRef, key pair, operator /32 and unchanged ALB deny rule.
+   The create-only deploy helper is not an update command. The template
+   cannot verify that parameter addresses are free; this check is manual.
+4. Only after separate approval, execute that change set. New nodes are
+   created before old nodes are deleted. Reusing either old IP can make the
+   update fail. Do not terminate existing nodes as a shortcut.
+5. After completion, get both new instance IDs/public IPs. Reinstall the drill
+   key on **both** nodes over SSH, verify `COWIN_ZONE_LETTER=a/b` and that each
+   `COWIN_PEER_URL` uses the other's new private IP, then restart cowin.
+6. Verify both /health endpoints, ALB target health, and public /simulate/*403
+   before any separately approved drill. Reopen all three forwards using the
+   new public IPs. If rollback occurs, inspect the actual live IPs, config and
+   key setup again before resuming; do not assume the old topology survived.
+
+Nodes start in dev mode before key provisioning. Network restrictions and
+the ALB deny rule are still required; the API key is defense in depth, not a
+replacement for those controls. Launch templates add no billable service,
+but temporary overlapping EC2 nodes and the ALB can incur charges. This
+update path is statically checked and linted, not live-AWS tested here.
+
+References: [EC2 UserData lifecycle](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-ec2-instance.html),
+[launch-template version replacement](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-ec2-instance-launchtemplatespecification.html),
+[first-boot scripts](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html).
 
 ## Lookup frontend
 

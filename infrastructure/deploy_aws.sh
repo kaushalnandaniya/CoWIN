@@ -93,13 +93,30 @@ case "$1" in
 
 Operator post-deploy steps (the /simulate drill key is never in UserData):
   1. Pick an operator key (16+ chars), keep it in a password manager.
-  2. On BOTH nodes, over SSH:
-       echo 'COWIN_API_KEY=<the key>' | sudo tee -a /etc/default/cowin-lookup
+  2. On BOTH nodes, over SSH (ASCII letters/digits/-/_ key):
+       sudo chmod 600 /etc/default/cowin-lookup
+       read -rsp 'Drill key: ' COWIN_API_KEY; printf '\n'
+       printf 'COWIN_API_KEY=%s\n' "$COWIN_API_KEY" | sudo tee -a /etc/default/cowin-lookup >/dev/null
+       unset COWIN_API_KEY
        sudo systemctl restart cowin
-  3. For a drill: ssh -L 8081:localhost:8080 ec2-user@<zone A public IP>
-                  ssh -L 8082:localhost:8080 ec2-user@<zone B public IP>
-     then open http://localhost:8081/admin/ and point endpoint A/B at the
-     local forwards. Never send the key over chat or the public ALB.
+  3. Terminal 1 (replace <ALB DNS name> with LoadBalancerDNSName output):
+       ssh -N -o ExitOnForwardFailure=yes \
+         -L 127.0.0.1:8080:<ALB DNS name>:80 \
+         -L 127.0.0.1:8081:localhost:8080 ec2-user@<zone A public IP>
+     Terminal 2:
+       ssh -N -o ExitOnForwardFailure=yes \
+         -L 127.0.0.1:8082:localhost:8080 ec2-user@<zone B public IP>
+     Add -i <private-key-file> if needed. Open http://localhost:8081/admin/
+     Apply ALB=http://localhost:8080 A=http://localhost:8081 B=http://localhost:8082.
+     Check all endpoints BEFORE entering the key. Keep both SSH sessions up.
+     Browser-to-AWS traffic uses SSH; the ALB forward/peer probes use HTTP
+     inside AWS. Never enter the key on the public site or send it in chat.
+  4. This helper creates stacks; it does not update them. Replacing updates
+     require TWO fresh free private IPs and a reviewed change set replacing
+     BOTH nodes. Both bootstraps refresh both peer URLs via launch templates.
+     Reinstall the key on BOTH replacement nodes and reopen all forwards.
+     See service/README.md for migration, maintenance and rollback checks.
+
 RUNBOOK
         ;;
 

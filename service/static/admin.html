@@ -111,7 +111,7 @@
           <button id="btn-recover-b" class="secondary" type="button">Recover Zone B</button>
         </div>
         <p id="control-result" class="control-result" role="status"></p>
-        <p class="field-hint">Controls go straight to each zone's node. On the AWS deployment the ALB denies /simulate/* with 403, so open an SSH tunnel per node (ssh -L 8081:localhost:8080 &lt;zone A host&gt; and -L 8082:... for zone B) and load this page through the tunnel too (http://localhost:8081/admin/), with the endpoint fields pointed at the local forwards - the page and the API key then travel inside SSH, not public HTTP. A simulated failure auto-recovers after about 2 minutes even if Recover is never pressed, and pressing Stop again during a failure is refused (the window can't be extended). Only one zone can be down at a time: while one zone is degraded, the other zone's Stop is refused with a 409.</p>
+        <p class="field-hint">Controls go straight to each node; the ALB denies /simulate/* with 403. Load this panel through the node A SSH tunnel at http://localhost:8081/admin/. Forward ALB port 80 to localhost:8080 too, and node B port 8080 to localhost:8082 (full commands in service/README.md). Check all endpoint fields before typing the key: node control URLs must be your loopback forwards. The default timer recovers an accepted failure after about 2 minutes; repeated Stop on that node is refused without replacing the timer. Drill one zone at a time. Peer checks are not an AWS-wide availability guarantee.</p>
         <h3 class="log-title">Event log</h3>
         <ul id="event-log" class="event-log"></ul>
       </aside>

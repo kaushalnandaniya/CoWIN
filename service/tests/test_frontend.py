@@ -67,7 +67,7 @@ class TestFrontend(unittest.TestCase):
                 self.assertIn('Stop Zone B', body)
                 self.assertIn('Recover Zone B', body)
                 # The page states the one-zone-down safety rule.
-                self.assertIn('Only one zone can be down at a time', body)
+                self.assertIn('Drill one zone at a time', body)
                 # No key is baked into the page: it is typed in per session.
                 self.assertIn('id="api-key"', body)
                 self.assertIn('type="password"', body)
