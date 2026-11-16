@@ -53,6 +53,20 @@ class TestFrontend(unittest.TestCase):
                 self.assertIn(mime, response.headers['Content-Type'])
                 self.assertGreater(len(response.read()), 100)
 
+    def test_shared_typography_has_no_remote_font_dependency(self):
+        with self.request('/ui/styles.css') as response:
+            css = response.read().decode()
+        self.assertIn('--sans:Arial,Helvetica,sans-serif;', css)
+        self.assertIn('font-family:var(--sans)', css)
+        self.assertIn('font:inherit', css)
+        self.assertNotIn('@import', css)
+        self.assertNotIn('fonts.googleapis.com', css)
+        for path in ['/ui/', '/info', '/health', '/api/v1/centers', '/metrics', '/missing']:
+            with self.subTest(path=path), self.html_request(path) as response:
+                body = response.read().decode()
+                self.assertIn('href="/ui/styles.css"', body)
+                self.assertNotIn('fonts.googleapis.com', body)
+
     def test_no_filesystem_fallback(self):
         for path in ['/ui/../app.py', '/ui/%2e%2e/app.py', '/ui/centers_data.json',
                      '/ui/unknown.js', '/ui//styles.css']:
