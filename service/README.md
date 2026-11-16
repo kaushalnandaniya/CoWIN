@@ -110,7 +110,7 @@ assets through the ALB listener to the same target group as the API. The public
 frontend URL is the ALB address followed by `/ui/`.
 
 The CloudFormation template embeds no application copies: each node fetches
-`app.py`, `centers_data.json` and the three static assets from the repository
+`app.py`, `pages.py`, `centers_data.json` and the three static assets from the repository
 at the `AppRepoRef` parameter (a commit SHA, pinned by `deploy_aws.sh` to the
 checked-out HEAD) at first boot. Deploying an updated frontend or service is
 therefore a fresh stack deploy at the new ref; running stacks do not pick up

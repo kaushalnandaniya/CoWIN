@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # IT457 Cloud Computing - CoWIN PoC AWS Automated Deployer & Manager
-# Authored for: Kaushal Nandaniya (ID: 202303036) - AWS Cloud Infrastructure Lead
+# Deploys and manages the two-zone CloudFormation stack (see README.md for ownership)
 # =============================================================================
 
 set -euo pipefail
