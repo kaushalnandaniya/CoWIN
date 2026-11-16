@@ -24,6 +24,8 @@ The repository contains:
 
 The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infrastructure/aws_cfn_cowin_two_zone.yaml) and deploys to AWS Mumbai (`ap-south-1`).
 
+![CoWIN two-zone architecture: clients reach the ALB, whose target group health-checks and load-balances two EC2 service nodes in separate availability zones](docs/diagrams/architecture.png)
+
 ```
                         Internet
                             |
@@ -90,6 +92,8 @@ RUN_DIR=/tmp/cowin-demo ./benchmark/run_experiment.sh
 python3 benchmark/generate_plots.py --run-dir /tmp/cowin-demo
 ```
 
+![Local experiment topology: the benchmark drives the ALB simulator, which load-balances two service nodes on one machine](docs/diagrams/local-simulator.png)
+
 The script starts two service nodes and a local ALB simulator, injects a zone failure mid-run, and records latency, zone distribution and failover transitions. Use a fresh `RUN_DIR` for each run. See [`benchmark/README.md`](benchmark/README.md) for the harness design and the manual AWS sampling workflow.
 
 ## AWS deployment
@@ -128,6 +132,8 @@ The simulator uses the template's threshold semantics (2 failures to remove, 2 s
 ### AWS run, 2026-11-16
 
 The Zone A instance was stopped at 10:38:28 IST and restarted at 10:39:40 IST behind the real ALB. Raw samples, the AWS-side timeline and a summary PDF are in [`evidence/aws-run-2026-11-16/`](evidence/aws-run-2026-11-16/).
+
+![Failover timeline of the real AWS run: baseline, Zone A stopped, a roughly 10-second detection window with 10 client errors, Zone B serving all traffic, then recovery and rebalancing](docs/diagrams/failover-timeline.png)
 
 | Phase | Requests | Successful | Errors |
 | --- | ---: | ---: | ---: |
