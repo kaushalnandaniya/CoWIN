@@ -83,5 +83,66 @@ class TestFrontend(unittest.TestCase):
             self.assertNotIn('setInterval', script)
 
 
+    def html_request(self, path, accept='text/html'):
+        request = urllib.request.Request(self.base + path, headers={'Accept': accept})
+        try:
+            return urllib.request.urlopen(request, timeout=5)
+        except urllib.error.HTTPError as error:
+            return error
+
+    def test_browser_pages_and_aliases(self):
+        for path, heading in [('/', 'Service information'), ('/info', 'Endpoint directory'),
+                              ('/health', 'Health status'), ('/metrics', 'Operational counters'),
+                              ('/api/v1/centers', 'Matching centers'), ('/centers', 'Matching centers')]:
+            with self.subTest(path=path), self.html_request(path) as response:
+                body = response.read().decode()
+                self.assertEqual(response.status, 200)
+                self.assertIn('text/html', response.headers['Content-Type'])
+                self.assertEqual(response.headers['Vary'], 'Accept')
+                self.assertIn(heading, body)
+                self.assertIn('/ui/styles.css', body)
+                self.assertIn('Sample data. Real API requests.', body)
+                self.assertEqual(int(response.headers['Content-Length']), len(body.encode()))
+                self.assertIn("default-src 'self'", response.headers['Content-Security-Policy'])
+
+    def test_html_errors_keep_http_status_and_escape_input(self):
+        for path, code in [('/missing', 404), ('/api/v1/centers?pincode=no', 400)]:
+            with self.subTest(path=path), self.html_request(path) as response:
+                self.assertEqual(response.status, code)
+                self.assertIn('text/html', response.headers['Content-Type'])
+        import pages
+        attack = '<script>alert(1)</script>'
+        for page in [pages.not_found_page(attack), pages.error_page({'message': attack}, 400),
+                     pages.centers_page({'centers': [{'name': attack}]}, {'district': attack})]:
+            self.assertNotIn(attack, page)
+            self.assertIn('&lt;script&gt;', page)
+
+    def test_html_unhealthy_keeps_500(self):
+        self.server.state.set_unhealthy(True)
+        try:
+            with self.html_request('/health') as response:
+                self.assertEqual(response.status, 500)
+                self.assertIn('Unhealthy', response.read().decode())
+        finally:
+            self.server.state.set_unhealthy(False)
+
+    def test_accept_negotiation_preserves_json(self):
+        for accept in ['*/*', 'application/json', 'text/html;q=0',
+                       'text/html;q=.2,application/json;q=.9', 'text/html;q=oops']:
+            with self.subTest(accept=accept), self.html_request('/info', accept) as response:
+                self.assertIn('application/json', response.headers['Content-Type'])
+                self.assertIn('endpoints', json.load(response))
+        with self.html_request('/info', 'text/html,application/xhtml+xml,*/*;q=.8') as response:
+            self.assertIn('text/html', response.headers['Content-Type'])
+
+    def test_html_filters_and_empty_results(self):
+        with self.html_request('/api/v1/centers?district=Nowheregarh') as response:
+            body = response.read().decode()
+            self.assertIn('No centers found', body)
+            self.assertIn('Nowheregarh', body)
+        with self.html_request('/api/v1/centers?pincode=380009') as response:
+            self.assertIn('pincode 380009', response.read().decode())
+
+
 if __name__ == '__main__':
     unittest.main()

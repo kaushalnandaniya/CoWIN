@@ -110,6 +110,19 @@ SMOKE_JS = r"""
     $('retry-button').click();
     ok('retry restores results after a failure',
        await waitFor(() => cards() === __DISTRICT_COUNT__ && $('error').hidden));
+    for (const [path, heading, status] of [
+      ['/info', 'Service information', 200], ['/health', 'Health status', 200],
+      ['/api/v1/centers', '__TOTAL__ centers', 200], ['/metrics', 'Metrics', 200],
+      ['/missing', 'Page not found', 404]
+    ]) {
+      const response = await fetch(path, { headers: { Accept: 'text/html' } });
+      const html = new DOMParser().parseFromString(await response.text(), 'text/html');
+      ok('HTML route ' + path, response.status === status &&
+         html.querySelector('h1')?.textContent === heading &&
+         html.querySelector('link[rel="stylesheet"]')?.getAttribute('href') === '/ui/styles.css' &&
+         !!html.querySelector('footer'));
+    }
+
   } catch (error) {
     out.push('FAIL harness exception: ' + error.message);
   }
