@@ -8,8 +8,7 @@ import html
 import time
 
 BRAND = ('<a class="brand" href="/ui/" aria-label="CoWIN home">'
-         '<span class="brand-mark" aria-hidden="true">+</span>CoWIN'
-         '<span class="brand-tag">CLOUD LAB</span></a>')
+         '<span class="brand-mark" aria-hidden="true">+</span>CoWIN</a>')
 FOOTER = '<footer><span>CoWIN / Two-zone cloud deployment</span></footer>'
 
 

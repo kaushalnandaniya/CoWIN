@@ -92,18 +92,6 @@ input:focus-visible,button:focus-visible,a:focus-visible {
   font-weight:400;
 }
 
-.brand-tag {
-  font-size:12px;
-  line-height:18px;
-  font-weight:600;
-  letter-spacing:0.06em;
-  text-transform:uppercase;
-  margin-left:8px;
-  border-left:1px solid var(--line);
-  padding-left:16px;
-  color:var(--secondary);
-}
-
 .api-link {
   font-size:14px;
   line-height:20px;
@@ -678,10 +666,6 @@ footer {
 @media(max-width:400px) {
   .brand {
     font-size:20px;
-  }
-  .brand-tag {
-    margin-left:4px;
-    padding-left:8px;
   }
 }
 
