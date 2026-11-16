@@ -78,7 +78,7 @@
       $('zone').textContent = data.served_by?.zone || 'Not reported';
       $('instance').textContent = data.served_by?.instance_id || 'Not reported';
       $('request-state').textContent = 'API responded';
-      $('request-dot').style.background = '#126653';
+      $('request-dot').style.background = '#166534';
       $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } catch (error) {
       $('error').hidden = false;
