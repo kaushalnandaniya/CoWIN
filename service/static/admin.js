@@ -243,12 +243,15 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
-      // Zone-pinned path: the load balancer (local simulator or AWS listener
-      // rule) forwards /simulate/zone-<letter>/* to that zone's node only,
-      // and the node itself double-checks the letter before acting.
+      // Direct-to-node control: each zone's command goes to that zone's
+      // own endpoint (locally the node itself, on AWS an SSH tunnel
+      // forward - the ALB denies /simulate/* with 403 by design), so the
+      // drill can only reach the intended zone. The zone-pinned path
+      // lets the node double-check the letter before acting.
       const headers = {};
       if (apiKey) headers['X-API-Key'] = apiKey;
-      const response = await fetch(`${cfg.alb}/simulate/zone-${zoneLetter}/${action}`, { method: 'POST', headers, signal: controller.signal });
+      const nodeBase = zoneLetter === 'a' ? cfg.a : cfg.b;
+      const response = await fetch(`${nodeBase}/simulate/zone-${zoneLetter}/${action}`, { method: 'POST', headers, signal: controller.signal });
       if (response.ok) {
         result.textContent = label + ': command accepted.';
         result.classList.add('ok');
@@ -268,9 +271,9 @@
         log(`${label}: HTTP ${response.status}`, 'log-bad');
       }
     } catch (error) {
-      result.textContent = label + ': could not reach the load balancer.';
+      result.textContent = label + ': could not reach the zone ' + zoneLetter.toUpperCase() + ' node (is the SSH tunnel up?).';
       result.classList.add('err');
-      log(label + ': load balancer unreachable', 'log-bad');
+      log(label + ': zone ' + zoneLetter.toUpperCase() + ' node unreachable', 'log-bad');
     } finally {
       clearTimeout(timeout);
       for (const id of ['btn-stop', 'btn-recover', 'btn-stop-b', 'btn-recover-b']) $(id).disabled = false;

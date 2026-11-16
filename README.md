@@ -31,8 +31,8 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
                             |
                   Application Load Balancer
                   (internet-facing, port 80)
-                  /simulate/* -> 403 at the edge, except the
-                  zone-pinned /simulate/zone-<a|b>/* operator path
+                  /simulate/* -> 403 at the edge
+                  (operator drills reach the nodes over SSH tunnels)
                             |
                 Target Group: GET /health every 5s
                 (timeout 2s, healthy/unhealthy thresholds 2/2)
@@ -47,7 +47,7 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
 | Network isolation | Custom VPC (`10.0.0.0/16`) with one public subnet per zone. Instances accept port 8080 only from the load balancer's security group. |
 | Health-gated routing | The target group removes a node after 2 consecutive failed probes and restores it after 2 successes. |
 | Stateless nodes | Every node serves the same dataset, so failover and recovery lose no state. RPO is zero by construction. |
-| Failure injection | Zone-pinned listener rules forward `/simulate/zone-a/*` and `/simulate/zone-b/*` to a single-zone target group, so a drill always hits the intended zone (every other `/simulate/*` is denied at the listener). The node still requires the API key, rejects a call for the wrong zone, refuses a second failure while its peer is unhealthy - even under simultaneous commands, where intent-first marking makes the loser back off with a 409 - and auto-recovers a simulated failure after about two minutes even if nobody recovers it. |
+| Failure injection | The ALB denies every `/simulate/*` with 403. An operator drill tunnels SSH to the intended node (`ssh -L`) and calls its zone-pinned path directly, so the command can only reach that zone and the API key never crosses public HTTP. The node requires the API key, rejects a call for the wrong zone, refuses a second failure while its peer is unhealthy - even under simultaneous commands, where intent-first marking makes the loser back off with a 409 - and auto-recovers a simulated failure after about two minutes even if nobody recovers it. |
 | Self-healing | Each node runs the service under systemd with `Restart=always`. |
 
 ## Service
@@ -61,7 +61,7 @@ The topology is defined in [`infrastructure/aws_cfn_cowin_two_zone.yaml`](infras
 | `GET /metrics` | Uptime, zone health, per-endpoint and per-status counters, store and rate-limit counters. |
 | `GET /info` | Service information and endpoint directory. |
 | `GET /ui/` | Responsive lookup frontend. |
-| `/simulate/<action>` | Force the health check to fail or recover. Reached through the zone-pinned listener path `/simulate/zone-<a|b>/<action>`; requires `X-API-Key` when `COWIN_API_KEY` is set. |
+| `/simulate/<action>` | Force the health check to fail or recover. Reached directly on the node (on AWS, over an SSH tunnel) via the zone-pinned path `/simulate/zone-<a|b>/<action>`; requires `X-API-Key` when `COWIN_API_KEY` is set. |
 
 Browsers that send `Accept: text/html` receive styled views of the API routes. All other clients receive JSON. Every response carries `X-Served-By-Zone` and `X-Instance-Id` headers, so traffic distribution across zones is directly observable.
 
