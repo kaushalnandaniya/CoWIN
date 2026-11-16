@@ -1,0 +1,121 @@
+{
+  "environment": "real AWS EC2 stop/start through ALB",
+  "date": "2026-11-16",
+  "timezone": "Asia/Kolkata",
+  "phases": {
+    "baseline": {
+      "requests": 69,
+      "ok": 69,
+      "errors": 0,
+      "zones": {
+        "ap-south-1a": 35,
+        "ap-south-1b": 34
+      },
+      "statuses": {
+        "200": 69
+      },
+      "p50_ms": 477.781,
+      "p95_ms": 497.044,
+      "max_ms": 508.694,
+      "first_sample_ist": "2026-11-16T10:37:10.746+05:30",
+      "last_sample_ist": "2026-11-16T10:37:43.356+05:30"
+    },
+    "stop": {
+      "requests": 38,
+      "ok": 28,
+      "errors": 10,
+      "zones": {
+        "ap-south-1b": 27,
+        "ap-south-1a": 1
+      },
+      "statuses": {
+        "200": 28,
+        "HTTP Error 502: Bad Gateway": 9,
+        "timed out": 1
+      },
+      "p50_ms": 479.472,
+      "p95_ms": 507.014,
+      "max_ms": 2018.744,
+      "first_sample_ist": "2026-11-16T10:38:26.464+05:30",
+      "last_sample_ist": "2026-11-16T10:38:45.873+05:30"
+    },
+    "survivor": {
+      "requests": 69,
+      "ok": 69,
+      "errors": 0,
+      "zones": {
+        "ap-south-1b": 69
+      },
+      "statuses": {
+        "200": 69
+      },
+      "p50_ms": 478.203,
+      "p95_ms": 482.089,
+      "max_ms": 508.828,
+      "first_sample_ist": "2026-11-16T10:38:54.357+05:30",
+      "last_sample_ist": "2026-11-16T10:39:26.865+05:30"
+    },
+    "start": {
+      "requests": 89,
+      "ok": 89,
+      "errors": 0,
+      "zones": {
+        "ap-south-1b": 87,
+        "ap-south-1a": 2
+      },
+      "statuses": {
+        "200": 89
+      },
+      "p50_ms": 478.303,
+      "p95_ms": 497.942,
+      "max_ms": 509.18,
+      "first_sample_ist": "2026-11-16T10:39:38.228+05:30",
+      "last_sample_ist": "2026-11-16T10:40:20.463+05:30"
+    },
+    "final": {
+      "requests": 68,
+      "ok": 68,
+      "errors": 0,
+      "zones": {
+        "ap-south-1a": 33,
+        "ap-south-1b": 35
+      },
+      "statuses": {
+        "200": 68
+      },
+      "p50_ms": 478.425,
+      "p95_ms": 497.69,
+      "max_ms": 503.741,
+      "first_sample_ist": "2026-11-16T10:40:30.601+05:30",
+      "last_sample_ist": "2026-11-16T10:41:02.822+05:30"
+    }
+  },
+  "limitations": [
+    "Sampling was run in separate bounded windows; gaps between phases are not monitored. This is not continuous uptime evidence.",
+    "Sequential sampler: 5 requests/second is an upper bound, not achieved throughput.",
+    "2-second timeout is a client timeout; timed-out requests might have completed later.",
+    "Failover is an instance stop in one AZ, not a whole-AZ or region outage.",
+    "Read-only sample dataset: database replication and RPO were not tested.",
+    "Screenshots and AWS API captures are evidence; no continuous video was recorded by this test.",
+    "AWS health transitions are bounded by polling, not exact internal event times."
+  ],
+  "milestones": {
+    "stop_request_ist": "2026-11-16T10:38:28.012+05:30",
+    "stop_accepted_ist": "2026-11-16T10:38:28.552+05:30",
+    "first_unhealthy_observation_ist": "2026-11-16T10:38:40.258+05:30",
+    "start_request_ist": "2026-11-16T10:39:39.798+05:30",
+    "start_accepted_ist": "2026-11-16T10:39:40.800+05:30",
+    "both_healthy_observation_ist": "2026-11-16T10:40:20.304+05:30",
+    "first_failed_sample_ist": "2026-11-16T10:38:28.920+05:30",
+    "last_failed_sample_ist": "2026-11-16T10:38:38.662+05:30",
+    "next_successful_sample_ist": "2026-11-16T10:38:39.143+05:30",
+    "first_to_last_failed_sample_seconds": 9.742,
+    "first_error_to_next_success_after_last_error_seconds": 10.223
+  },
+  "total": {
+    "requests": 333,
+    "ok": 323,
+    "errors": 10,
+    "success_percent": 96.997
+  }
+}

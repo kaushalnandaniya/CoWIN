@@ -347,6 +347,105 @@ class TestMetricsEndpoint(LiveServerTestCase):
         self.assertIn("200", after["responses_by_status"])
 
 
+class TestHealthReadiness(LiveServerTestCase):
+    """/health reports readiness, not just the simulation flag."""
+
+    def test_healthy_when_dataset_loaded(self):
+        status, _, body = self.request("/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "healthy")
+
+    def test_metrics_reports_store_ready(self):
+        _, _, body = self.request("/metrics")
+        self.assertEqual(body["store"]["ready"], True)
+        self.assertEqual(body["store"]["detail"], "ok")
+        self.assertEqual(body["store"]["centers_loaded"], len(DATASET))
+
+
+class TestHealthReadinessDegraded(LiveServerTestCase):
+    """A dataset-load failure fails readiness instead of serving fake data
+    silently: /health returns 500 (the ALB would drain the node) while the
+    fallback record keeps lookups answerable for debugging."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd, cls.thread, cls.base_url = start_test_server(
+            data_file="/nonexistent-cowin-test/missing.json",
+            db_file=":memory:")
+
+    def test_health_fails_loudly(self):
+        status, _, body = self.request("/health")
+        self.assertEqual(status, 500)
+        self.assertEqual(body["status"], "unhealthy")
+        self.assertIn("not ready", body["reason"].lower())
+        self.assertIn("fallback", body["reason"].lower())
+
+    def test_fallback_still_answerable_but_marked(self):
+        status, _, body = self.request("/api/v1/centers")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["centers"], app.FALLBACK_CENTERS)
+        _, _, metrics = self.request("/metrics")
+        self.assertEqual(metrics["store"]["ready"], False)
+        self.assertIn("fallback", metrics["store"]["detail"])
+
+
+class TestHealthReadinessStoreFailure(unittest.TestCase):
+    """A broken SQLite handle marks the node not ready (no silent 200s)."""
+
+    def test_closed_db_fails_health(self):
+        httpd, thread, base_url = start_test_server()
+        try:
+            httpd.store.close()  # break the store behind the handler's back
+            req = urllib.request.Request(base_url + "/health")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    status, body = resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                status, body = e.code, json.loads(e.read())
+            self.assertEqual(status, 500)
+            self.assertEqual(body["status"], "unhealthy")
+            self.assertIn("not ready", body["reason"].lower())
+        finally:
+            stop_test_server(httpd, thread)
+
+
+class TestBlankApiKeyNormalization(unittest.TestCase):
+    """A blank configured key is normalized to "unconfigured"."""
+
+    def test_empty_string_becomes_none(self):
+        self.assertIsNone(app.ServiceConfig(api_key="").api_key)
+
+    def test_whitespace_only_becomes_none(self):
+        self.assertIsNone(app.ServiceConfig(api_key="   \t ").api_key)
+
+    def test_real_key_is_preserved(self):
+        self.assertEqual(app.ServiceConfig(api_key=TEST_API_KEY).api_key,
+                         TEST_API_KEY)
+
+
+class TestBlankApiKeyBehavesAsDevMode(LiveServerTestCase):
+    """With a blank key the service is in dev mode, consistently.
+
+    Regression test: previously an empty COWIN_API_KEY accepted a missing
+    X-API-Key header on /simulate/* while /metrics reported auth enabled.
+    """
+
+    server_kwargs = {"api_key": ""}
+
+    def tearDown(self):
+        self.request("/simulate/recover")
+
+    def test_missing_header_is_not_accepted_as_a_key(self):
+        # Dev mode: the request is allowed because no key is configured,
+        # not because a missing header matched the blank key.
+        status, _, _ = self.request("/simulate/fail")
+        self.assertEqual(status, 200)
+
+    def test_metrics_agrees_auth_is_disabled(self):
+        _, _, body = self.request("/metrics")
+        self.assertEqual(body["auth"]["enabled"], False)
+
+
 class TestTightenedValidation(LiveServerTestCase):
     """The remaining loose inputs get consistent JSON errors."""
 

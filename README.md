@@ -17,7 +17,7 @@ and deploys into AWS Mumbai (`ap-south-1`):
                         Internet
                             │
                   Application Load Balancer
-                  (internet-facing, port 8080)
+                  (internet-facing, port 80)
                             │
                 Target Group: health check
                 GET /health every 5s
@@ -41,8 +41,9 @@ Key properties:
   lose no state: RPO is zero by construction.
 
 The service itself ([`service/`](service/)) is a zero-dependency Python 3 lookup
-service with two endpoints, `GET /health` and `GET /api/v1/centers`, and tags every
-response with `X-Served-By-Zone` and `X-Instance-Id` headers so traffic distribution
+service exposing `GET /health` (readiness-aware), `GET /api/v1/centers`, `GET
+/metrics`, and a small demo frontend at `/ui/`. It tags every response with
+`X-Served-By-Zone` and `X-Instance-Id` headers so traffic distribution
 across zones is directly observable.
 
 ## Quickstart
@@ -55,9 +56,11 @@ across zones is directly observable.
 
 This starts two service nodes and a local ALB simulator, waits for every component
 to report ready, injects a zone failure mid-run, and records latency, zone
-distribution, and failover transitions into `benchmark/benchmark_results.json` and
-`benchmark/benchmark_requests.csv`. See [`benchmark/README.md`](benchmark/README.md)
-for the harness design.
+distribution, and failover transitions into `benchmark_results.json` and
+`benchmark_requests.csv` under the run directory (set `RUN_DIR` to choose it; the
+launcher prints the path). See [`benchmark/README.md`](benchmark/README.md)
+for the harness design. The committed reference run is
+[`benchmark/benchmark_results.json`](benchmark/benchmark_results.json).
 
 ### AWS deployment
 
@@ -80,22 +83,34 @@ Latest committed run ([`benchmark/benchmark_results.json`](benchmark/benchmark_r
 | Failover detection and traffic shift | 2.1 s |
 | Disruption window (client-visible errors) | 0.0 s |
 | Recovered node re-admitted to rotation | ~2 s after recovery (t≈24.0s) |
-| Latency p50 / p99 | 1.07 ms / 1.92 ms |
+| Latency p50 / p99 | 1.34 ms / 2.21 ms |
 
-RTO is 2.1 seconds against a 5-second health-check interval; RPO is zero because the
-service is stateless. These numbers come from the local ALB simulator, which
-reproduces the target-group health-check semantics of the CloudFormation template;
-they characterize the failover logic, not AWS network behavior.
+RPO is zero because the service is stateless. These numbers come from the local ALB
+simulator, which mirrors the template's threshold semantics (2 consecutive probes to
+mark a target unhealthy, 2 to restore it) but probes `/health` every 1s with a 0.8s
+timeout, while the CloudFormation target group probes every 5s with a 2s timeout.
+They characterize the failover logic, not AWS network behavior; the 2.1s RTO is
+measured against the simulator's 1s probing, not the template's 5s interval.
+
+A real AWS run against the CloudFormation deployment (Zone A instance stopped
+and restarted through the ALB, 2026-11-16) is committed under
+[`evidence/aws-run-2026-11-16/`](evidence/aws-run-2026-11-16/): 323/333 requests
+successful (10 client-visible errors during the ~10s detection window), traffic
+served 100% by Zone B while Zone A was down, and both targets healthy again
+~40s after the restart. The raw request samples, AWS API timeline and result
+aggregates are included so the report's failover tables are independently
+checkable.
 
 ## Cost and scaling
 
 Full analysis in [`docs/week-3/COST_AND_SCALING_ANALYSIS.md`](docs/week-3/COST_AND_SCALING_ANALYSIS.md):
 
-- The two-zone PoC runs at **$0.00/month on the AWS Free Tier**, or about
-  **$0.054/hour (~$0.61 for an 8-hour demo)** at commercial rates.
+- The two-zone PoC's 8-hour demo runs at **$0.00 on the AWS Free Tier**; a
+  full-month always-on run exceeds the account-wide free-tier allowances. At
+  commercial rates the PoC is about **$0.054/hour (~$0.61 for the demo)**.
 - The national-scale model prices a multi-region active-active deployment on AWS at
   **~$45,800/month**, and a sovereign-cloud alternative (NIC MeghRaj) at
-  **~₹60–75 lakh/month** with no egress charges.
+  **~₹33.5 lakh/month** (itemized) with no egress charges.
 
 ## Repository layout
 
