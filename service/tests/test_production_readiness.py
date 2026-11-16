@@ -347,6 +347,43 @@ class TestMetricsEndpoint(LiveServerTestCase):
         self.assertIn("200", after["responses_by_status"])
 
 
+class TestBlankApiKeyNormalization(unittest.TestCase):
+    """A blank configured key is normalized to "unconfigured"."""
+
+    def test_empty_string_becomes_none(self):
+        self.assertIsNone(app.ServiceConfig(api_key="").api_key)
+
+    def test_whitespace_only_becomes_none(self):
+        self.assertIsNone(app.ServiceConfig(api_key="   \t ").api_key)
+
+    def test_real_key_is_preserved(self):
+        self.assertEqual(app.ServiceConfig(api_key=TEST_API_KEY).api_key,
+                         TEST_API_KEY)
+
+
+class TestBlankApiKeyBehavesAsDevMode(LiveServerTestCase):
+    """With a blank key the service is in dev mode, consistently.
+
+    Regression test: previously an empty COWIN_API_KEY accepted a missing
+    X-API-Key header on /simulate/* while /metrics reported auth enabled.
+    """
+
+    server_kwargs = {"api_key": ""}
+
+    def tearDown(self):
+        self.request("/simulate/recover")
+
+    def test_missing_header_is_not_accepted_as_a_key(self):
+        # Dev mode: the request is allowed because no key is configured,
+        # not because a missing header matched the blank key.
+        status, _, _ = self.request("/simulate/fail")
+        self.assertEqual(status, 200)
+
+    def test_metrics_agrees_auth_is_disabled(self):
+        _, _, body = self.request("/metrics")
+        self.assertEqual(body["auth"]["enabled"], False)
+
+
 class TestTightenedValidation(LiveServerTestCase):
     """The remaining loose inputs get consistent JSON errors."""
 

@@ -91,6 +91,12 @@ class ServiceConfig:
         self.port = port
         self.zone = zone
         self.instance_id = instance_id or f"i-{socket.gethostname()[:8]}"
+        # A blank configured key must not act like a real one: normalize it
+        # to "unconfigured" so the auth gate, the startup warning and
+        # /metrics agree. Previously an empty COWIN_API_KEY accepted a
+        # missing X-API-Key header while /metrics reported auth enabled.
+        if api_key is not None and not str(api_key).strip():
+            api_key = None
         self.api_key = api_key
         self.rate_limit_rps = float(rate_limit_rps or 0.0)
         self.rate_limit_burst = (float(rate_limit_burst) if rate_limit_burst
