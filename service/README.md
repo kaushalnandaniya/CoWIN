@@ -16,7 +16,7 @@ on first start and lookups run as SQL queries, with responses unchanged
 from the original file-backed version.
 
 ### Integration Contract with Load Balancer:
-* `GET /health`: Probed every 5 seconds by the ALB Target Group. Must return HTTP 200 when healthy.
+* `GET /health`: Probed every 5 seconds by the ALB Target Group. Returns HTTP 200 only when the node can serve lookups: the center store is reachable and the real dataset is loaded. A dataset-load failure serves the fallback record but reports HTTP 500 (not ready), so the ALB drains the node instead of clients silently getting one hardcoded sample center.
 * `GET /api/v1/centers`: Lookup endpoint returning sample vaccination center availability.
 * Response Headers: `X-Served-By-Zone` and `X-Instance-Id` to verify multi-zone routing.
 
@@ -36,7 +36,7 @@ from the original file-backed version.
 | `AWS_INSTANCE_ID` | `--instance-id` | hostname-derived | Instance ID reported in responses/headers |
 | `CENTERS_DATA_FILE` | `--data-file` | `centers_data.json` next to `app.py` | Dataset JSON, loaded into SQLite on first start |
 | `CENTERS_DB_FILE` | `--db-file` | `<data file>` with `.db` suffix | SQLite database path (`:memory:` works) |
-| `COWIN_API_KEY` | `--api-key` | unset | API key required via the `X-API-Key` header on `/simulate/*`. **Unset = dev mode**: endpoints stay open and a warning is logged at startup. |
+| `COWIN_API_KEY` | `--api-key` | unset | API key required via the `X-API-Key` header on `/simulate/*`. **Unset = dev mode**: endpoints stay open and a warning is logged at startup. A blank value is treated as unset, so an empty key can never match a missing header while `/metrics` reports auth enabled. |
 | `RATE_LIMIT_RPS` | `--rate-limit-rps` | `0` (disabled) | Sustained requests/second allowed per client IP; excess gets a JSON `429` with `Retry-After` |
 | `RATE_LIMIT_BURST` | `--rate-limit-burst` | `2 * RATE_LIMIT_RPS` | Token bucket size per client IP |
 | `LOG_LEVEL` | `--log-level` | `INFO` | Logging verbosity |
@@ -49,8 +49,8 @@ off) keep local demos and the 10 req/s failover benchmark working.
 `cowin-lookup.service` is the reference unit; the CloudFormation UserData
 installs an equivalent unit (`cowin.service`) with `Restart=always`, so the
 service comes back automatically after a crash or reboot. Optional
-configuration lives in `/etc/default/cowin-lookup` (created by the UserData
-with commented examples).
+configuration lives in `/etc/default/cowin-lookup` (created by the bootstrap
+with the required `COWIN_API_KEY` and commented examples).
 
 ## Read-only deployment verification
 
@@ -108,11 +108,12 @@ Restart the service after installing the updated `app.py`. Allow `/ui/` and its
 assets through the ALB listener to the same target group as the API. The public
 frontend URL is the ALB address followed by `/ui/`.
 
-The existing CloudFormation template embeds its own copies of `app.py` in
-UserData. It does not automatically pick up repository file changes: update
-both embedded copies and include all three static assets before using it for
-a fresh frontend deployment. This PR does not alter infrastructure or deploy
-the frontend to an existing stack.
+The CloudFormation template embeds no application copies: each node fetches
+`app.py`, `centers_data.json` and the three static assets from the repository
+at the `AppRepoRef` parameter (a commit SHA, pinned by `deploy_aws.sh` to the
+checked-out HEAD) at first boot. Deploying an updated frontend or service is
+therefore a fresh stack deploy at the new ref; running stacks do not pick up
+repository changes on their own.
 
 `/` and `/info` remain JSON for compatibility. Only the explicitly allowlisted
 `/ui`, `/ui/`, `/ui/index.html`, `/ui/styles.css` and `/ui/app.js` routes serve
