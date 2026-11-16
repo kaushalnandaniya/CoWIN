@@ -26,10 +26,10 @@
       const row = text('div', '', 'session');
       const top = text('div', '', 'session-top');
       top.append(text('span', session.vaccine || 'Vaccine not listed'), text('span', `${session.min_age_limit ?? '?'}+ years`));
-      row.append(top, text('span', `${session.date || 'Date not listed'} · Sample capacity: ${session.available_capacity ?? 'Not listed'}`, 'session-detail'));
+      row.append(top, text('span', `${session.date || 'Date not listed'} · Available capacity: ${session.available_capacity ?? 'Not listed'}`, 'session-detail'));
       sessions.append(row);
     }
-    if (!sessions.childElementCount) sessions.append(text('p', 'No sample sessions listed.', 'session-detail'));
+    if (!sessions.childElementCount) sessions.append(text('p', 'No sessions listed.', 'session-detail'));
     return card;
   }
 
@@ -46,13 +46,14 @@
     setBusy(true);
     $('error').hidden = true;
     $('empty').hidden = true;
-    $('centers').replaceChildren();
+    $('centers').classList.add('is-loading');
     $('result-count').textContent = 'Searching';
-    $('status').textContent = 'Requesting sample centers from the API...';
+    $('status').textContent = 'Requesting centers from the API...';
     $('request-state').textContent = 'Lookup in progress';
     $('request-dot').style.background = '';
     $('zone').textContent = 'Waiting for response';
     $('instance').textContent = 'Waiting for response';
+    $('timestamp').textContent = 'Waiting for response';
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
@@ -68,33 +69,60 @@
       if (!Array.isArray(data.centers) || !data.centers.every(center => center && typeof center === 'object' && !Array.isArray(center))) throw new Error('The API returned an unexpected response. Please try again.');
       const fragment = document.createDocumentFragment();
       for (const center of data.centers) fragment.append(renderCenter(center));
-      $('centers').append(fragment);
+      $('centers').replaceChildren(fragment);
       $('empty').hidden = data.centers.length !== 0;
       $('result-count').textContent = `${data.centers.length} ${data.centers.length === 1 ? 'center' : 'centers'}`;
       const scope = [filters.district && `district "${filters.district}"`, filters.pincode && `pincode ${filters.pincode}`].filter(Boolean).join(' and ');
-      $('status').textContent = scope ? `Sample results for ${scope}.` : 'Showing all centers in the sample dataset.';
+      const found = `${data.centers.length} ${data.centers.length === 1 ? 'center' : 'centers'}`;
+      $('status').textContent = scope ? `${found} found for ${scope}.` : `Showing all ${data.centers.length} centers.`;
       $('zone').textContent = data.served_by?.zone || 'Not reported';
       $('instance').textContent = data.served_by?.instance_id || 'Not reported';
       $('request-state').textContent = 'API responded';
-      $('request-dot').style.background = '#126653';
+      $('request-dot').style.background = '#166534';
+      $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } catch (error) {
-      $('centers').replaceChildren();
       $('error').hidden = false;
       $('error-message').textContent = error.name === 'AbortError' ? 'The API took longer than 10 seconds to respond. Please try again.' : error instanceof TypeError ? 'Cannot reach the API. Check your connection, then try again.' : error instanceof SyntaxError ? 'The API returned an unreadable response. Please try again.' : error.message;
       $('result-count').textContent = 'Unavailable';
-      $('status').textContent = 'No current results to display.';
+      $('status').textContent = $('centers').childElementCount ? 'Lookup failed. The previous results are still shown.' : 'No current results to display.';
       $('request-state').textContent = 'Lookup failed';
       $('zone').textContent = 'Unknown';
       $('instance').textContent = 'Unknown';
+      $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } finally {
       clearTimeout(timeout);
+      $('centers').classList.remove('is-loading');
       setBusy(false);
     }
   }
 
+  const PINCODE_RULE = /^[1-9][0-9]{5}$/;
+  const PINCODE_MESSAGE = 'Enter a 6-digit pincode that starts with 1-9 (no leading zero), or leave the field blank.';
+
+  function validatePincode(value) {
+    const error = $('pincode-error');
+    if (value === '' || PINCODE_RULE.test(value)) {
+      error.hidden = true;
+      error.textContent = '';
+      $('pincode').removeAttribute('aria-invalid');
+      return true;
+    }
+    error.textContent = PINCODE_MESSAGE;
+    error.hidden = false;
+    $('pincode').setAttribute('aria-invalid', 'true');
+    $('pincode').focus();
+    return false;
+  }
+
+  $('pincode').addEventListener('input', () => {
+    if (!$('pincode-error').hidden) validatePincode($('pincode').value.trim());
+  });
+
   form.addEventListener('submit', event => {
     event.preventDefault();
-    if (form.reportValidity()) lookup({ district: $('district').value.trim(), pincode: $('pincode').value.trim() });
+    const pincode = $('pincode').value.trim();
+    if (!validatePincode(pincode)) return;
+    lookup({ district: $('district').value.trim(), pincode });
   });
   $('reset-button').addEventListener('click', () => { form.reset(); lookup({ district: '', pincode: '' }); });
   $('retry-button').addEventListener('click', () => lookup(lastFilters));

@@ -3,45 +3,54 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A sample-data vaccine center lookup for the IT457 two-zone cloud demo.">
-  <title>CoWIN | Center lookup demo</title>
+  <meta name="description" content="Find vaccine centers by district or pincode, served from a two-zone cloud deployment.">
+  <title>CoWIN | Vaccine center lookup</title>
   <link rel="stylesheet" href="/ui/styles.css">
   <script src="/ui/app.js" defer></script>
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/ui/" aria-label="CoWIN demo home"><span class="brand-mark" aria-hidden="true">+</span>CoWIN<span class="brand-tag">CLOUD LAB</span></a>
+    <a class="brand" href="/ui/" aria-label="CoWIN home"><span class="brand-mark" aria-hidden="true">+</span>CoWIN<span class="brand-tag">CLOUD LAB</span></a>
     <a class="api-link" href="/info">API info <span aria-hidden="true">↗</span></a>
   </header>
   <main>
     <section class="hero" aria-labelledby="page-title">
       <div class="eyebrow"><span class="tiny-dot"></span> IT457 / GOVERNMENT &amp; PUBLIC PLATFORMS</div>
-      <h1 id="page-title">A simpler way to<br>find a vaccine center.</h1>
-      <p class="intro">Explore sample centers by district or pincode.<br class="desktop-break"> One lookup, served by the cloud.</p>
-      <div class="demo-note"><strong>Course demo. Not a booking service.</strong> All centers, dates and capacity figures are static sample data, not live availability. This is not the official CoWIN portal.</div>
+      <h1 id="page-title">A simpler way to find a vaccine center.</h1>
+      <p class="intro">Explore centers by district or pincode.<br class="desktop-break"> One lookup, served by the cloud.</p>
     </section>
 
-    <section class="search-panel" aria-labelledby="search-title">
-      <div class="section-heading"><h2 id="search-title">Where would you like to search?</h2><span class="step-label">01 / LOOKUP</span></div>
+    <div class="lookup-row">
+      <section class="search-panel" aria-labelledby="search-title">
+      <div class="section-heading"><h2 id="search-title">Where would you like to search?</h2></div>
       <form id="search-form">
-        <div class="field"><label for="district">District</label><input id="district" name="district" type="text" maxlength="100" placeholder="e.g. Ahmedabad" autocomplete="off"><span class="field-hint">Partial names work too</span></div>
-        <div class="field"><label for="pincode">Pincode</label><input id="pincode" name="pincode" type="text" inputmode="numeric" pattern="[1-9][0-9]{5}" maxlength="6" placeholder="e.g. 380009" aria-describedby="pincode-hint"><span id="pincode-hint" class="field-hint">6 digits, optional</span></div>
+        <div class="field"><label for="district">District</label><input id="district" name="district" type="text" maxlength="100" placeholder="e.g. Ahmedabad" autocomplete="off" aria-describedby="district-hint"><span id="district-hint" class="field-hint">Partial names work too</span></div>
+        <div class="field"><label for="pincode">Pincode</label><input id="pincode" name="pincode" type="text" inputmode="numeric" maxlength="6" placeholder="e.g. 380009" aria-describedby="pincode-hint pincode-error"><span id="pincode-hint" class="field-hint">6 digits, optional</span><span id="pincode-error" class="field-error" role="alert" hidden></span></div>
         <button id="search-button" class="primary" type="submit">Find centers <span aria-hidden="true">→</span></button>
       </form>
-      <div class="search-bottom"><p>Use either field, or combine both to narrow your search.</p><button id="reset-button" class="text-button" type="button">Show all sample centers</button></div>
-    </section>
+      <div class="search-bottom"><p>Use either field, or combine both to narrow your search.</p><button id="reset-button" class="text-button" type="button">Show all centers</button></div>
+      </section>
+      <aside class="request-panel" aria-label="Last lookup details">
+        <div class="request-head"><span class="tiny-dot" id="request-dot"></span><strong id="request-state">Waiting for API</strong></div>
+        <dl>
+          <div><dt>Availability zone</dt><dd id="zone">Not yet known</dd></div>
+          <div><dt>Instance</dt><dd id="instance">Not yet known</dd></div>
+          <div><dt>Received at</dt><dd id="timestamp">Not yet known</dd></div>
+        </dl>
+        <p>Response metadata only. One response does not prove both zones are healthy or that failover has passed.</p>
+      </aside>
+    </div>
 
     <section class="results-section" aria-labelledby="results-title" aria-busy="false" id="results-section">
-      <div class="results-heading"><div><div class="eyebrow">SAMPLE DIRECTORY</div><h2 id="results-title">Vaccine centers</h2></div><span id="result-count" class="count-label">Ready to search</span></div>
-      <p id="status" role="status" aria-live="polite">Loading sample centers...</p>
+      <div class="results-heading"><div><div class="eyebrow">CENTER DIRECTORY</div><h2 id="results-title">Vaccine centers</h2></div><span id="result-count" class="count-label">Ready to search</span></div>
+      <p id="status" role="status" aria-live="polite">Loading centers...</p>
       <div id="error" role="alert" hidden><strong>We couldn't complete that lookup.</strong><p id="error-message"></p><button id="retry-button" class="secondary" type="button">Try again</button></div>
-      <div id="empty" class="empty-state" hidden><span class="empty-icon" aria-hidden="true">⌕</span><h3>No sample centers found</h3><p>Try a different district or pincode, or show all sample centers.</p></div>
+      <div id="empty" class="empty-state" hidden><span class="empty-icon" aria-hidden="true">⌕</span><h3>No centers found</h3><p>Try a different district or pincode, or show all centers.</p></div>
       <div id="centers" class="center-grid"></div>
     </section>
-    <aside class="request-panel" aria-label="Last lookup details"><div><span class="tiny-dot" id="request-dot"></span><strong id="request-state">Waiting for API</strong><span class="request-caption">LAST LOOKUP RESPONSE</span></div><dl><div><dt>Availability zone</dt><dd id="zone">Not yet known</dd></div><div><dt>Instance</dt><dd id="instance">Not yet known</dd></div></dl><p>Response metadata only. This does not prove both zones are healthy or that failover has passed.</p></aside>
   </main>
-  <footer><span>CoWIN / Two-zone proof of concept</span><span>Sample data. Real API requests.</span></footer>
+  <footer><span>CoWIN / Two-zone cloud deployment</span><span>Sample data. Real API requests.</span></footer>
   <noscript><p class="noscript">JavaScript is needed for the search interface. You can still <a href="/api/v1/centers">view all centers as JSON</a>.</p></noscript>
-  <template id="center-template"><article class="center-card"><div class="card-top"><span class="district-tag"></span><span class="fee-tag"></span></div><h3></h3><p class="address"></p><p class="location"></p><div class="center-hours"></div><div class="sessions"></div><div class="card-foot">SAMPLE SESSIONS · NOT LIVE AVAILABILITY</div></article></template>
+  <template id="center-template"><article class="center-card"><div class="card-top"><span class="district-tag"></span><span class="fee-tag"></span></div><h3></h3><p class="address"></p><p class="location"></p><div class="center-hours"></div><div class="sessions"></div><div class="card-foot">SESSIONS · NOT LIVE AVAILABILITY</div></article></template>
 </body>
 </html>

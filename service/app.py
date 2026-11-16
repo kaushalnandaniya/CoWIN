@@ -31,6 +31,7 @@ Production-readiness additions (still zero external dependencies):
 """
 
 import argparse
+import pages
 import hmac
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import json
@@ -412,9 +413,60 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _write_json(self, body, status_code=200, extra_headers=None):
-        self.state.record_response(urlparse(self.path).path, status_code)
-        self._set_headers(status_code, extra_headers=extra_headers)
+        path = urlparse(self.path).path
+        headers = dict(extra_headers or {})
+        navigable = (self.command == "GET" and path not in PROTECTED_PATHS)
+        if navigable:
+            headers["Vary"] = "Accept"
+        if navigable and self._wants_html():
+            if status_code >= 400:
+                markup = (pages.not_found_page(path) if status_code == 404 else
+                          pages.error_page(body, status_code))
+                if path == "/health":
+                    markup = pages.health_page(body, status_code)
+            elif path in ("/", "/info"):
+                markup = pages.info_page(body)
+            elif path == "/health":
+                markup = pages.health_page(body, status_code)
+            elif path in ("/api/v1/centers", "/centers"):
+                query = parse_qs(urlparse(self.path).query)
+                filters = {key: values[0] for key, values in query.items()}
+                markup = pages.centers_page(body, filters)
+            elif path == "/metrics":
+                markup = pages.metrics_page(body)
+            else:
+                markup = pages.error_page(body, status_code)
+            payload = markup.encode("utf-8")
+            headers.update({
+                "Content-Length": str(len(payload)),
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'self'; base-uri 'none'; "
+                    "frame-ancestors 'none'; form-action 'self'",
+            })
+            self.state.record_response(path, status_code)
+            self._set_headers(status_code, "text/html; charset=utf-8", headers)
+            self.wfile.write(payload)
+            return
+        self.state.record_response(path, status_code)
+        self._set_headers(status_code, extra_headers=headers)
         self.wfile.write(json.dumps(body, indent=2).encode("utf-8"))
+
+    def _wants_html(self):
+        """Require explicit text/html; wildcards preserve the JSON default."""
+        qualities = {}
+        for item in self.headers.get("Accept", "").lower().split(","):
+            media, *parameters = item.strip().split(";")
+            quality = 1.0
+            for parameter in parameters:
+                key, sep, value = parameter.strip().partition("=")
+                if sep and key == "q":
+                    try:
+                        quality = float(value)
+                    except ValueError:
+                        quality = 0.0
+            qualities[media] = quality if 0 <= quality <= 1 else 0.0
+        return (qualities.get("text/html", 0) > 0 and
+                qualities.get("text/html", 0) >= qualities.get("application/json", 0))
 
     def do_OPTIONS(self):
         self.send_response(204)

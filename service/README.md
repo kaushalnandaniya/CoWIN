@@ -119,3 +119,14 @@ repository changes on their own.
 `/ui`, `/ui/`, `/ui/index.html`, `/ui/styles.css` and `/ui/app.js` routes serve
 files. Other paths keep the API's JSON 404 response. Missing assets return a
 JSON 503, rather than exposing files outside that directory.
+
+### Browser views and API responses
+
+Browser requests that explicitly accept `text/html` get styled views at `/`
+(or `/info`), `/health`, `/api/v1/centers` (or `/centers`), `/metrics`, and the
+404 fallback. Requests without that media type keep the JSON contract.
+Explicit JSON preferences and `text/html;q=0` also keep JSON. Both variants
+send `Vary: Accept`, and HTML errors preserve their HTTP error status.
+
+Deploy `pages.py` alongside `app.py`, plus the complete `static/` directory.
+The browser views share `/ui/styles.css`; no new runtime packages are needed.

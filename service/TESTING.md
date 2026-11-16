@@ -22,6 +22,13 @@ responses with the file-backed version, API-key auth on `/simulate/*`
 exemptions), the `/metrics` endpoint and its counters, and the tightened
 input validation.
 
+`service/tests/test_frontend_smoke.py` goes a step further than the HTTP
+checks: it loads the real page in headless Chrome against the real service
+and drives the demo's key flows - initial load, district and pincode
+filters, the no-match empty state, inline pincode validation, and the
+error + retry path. It needs a Chrome or Chromium binary and skips cleanly
+on machines without one.
+
 ## Running the tests
 
 From the repository root:
