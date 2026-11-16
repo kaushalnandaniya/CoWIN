@@ -53,6 +53,7 @@
     $('request-dot').style.background = '';
     $('zone').textContent = 'Waiting for response';
     $('instance').textContent = 'Waiting for response';
+    $('timestamp').textContent = 'Waiting for response';
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
@@ -77,6 +78,7 @@
       $('instance').textContent = data.served_by?.instance_id || 'Not reported';
       $('request-state').textContent = 'API responded';
       $('request-dot').style.background = '#126653';
+      $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } catch (error) {
       $('centers').replaceChildren();
       $('error').hidden = false;
@@ -86,6 +88,7 @@
       $('request-state').textContent = 'Lookup failed';
       $('zone').textContent = 'Unknown';
       $('instance').textContent = 'Unknown';
+      $('timestamp').textContent = new Date().toLocaleTimeString([], { hour12: false });
     } finally {
       clearTimeout(timeout);
       setBusy(false);
