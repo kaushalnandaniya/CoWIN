@@ -24,6 +24,10 @@ Production-readiness additions (still zero external dependencies):
   RATE_LIMIT_BURST; 0 disables) with JSON 429s; /health and /metrics exempt
 - /metrics endpoint: uptime, zone health state, request/response counters,
   store info, and auth/rate-limit counters for monitoring
+- Readiness-aware /health: HTTP 200 only when the node can serve lookups
+  (center store reachable, real dataset loaded). A dataset-load failure
+  serves the fallback record but reports NOT READY so the ALB drains the
+  node instead of clients silently getting one hardcoded center.
 """
 
 import argparse
@@ -68,7 +72,9 @@ RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/metrics"})
 # Longest accepted district filter; longer values are rejected as 400.
 MAX_DISTRICT_FILTER_LENGTH = 100
 
-# Sample record served if the centers dataset cannot be loaded.
+# Sample record served if the centers dataset cannot be loaded. Serving
+# it marks the node NOT READY: /health fails so the ALB drains the node
+# instead of clients silently getting one hardcoded center.
 FALLBACK_CENTERS = [
     {
         "center_id": 563001,
@@ -182,16 +188,34 @@ class ServiceState:
 
 
 def load_centers(data_file):
-    """Load the centers dataset, falling back to a sample record on failure."""
+    """Load the centers dataset as (centers, used_fallback).
+
+    A load failure is loud: it logs at ERROR and marks the store degraded
+    so readiness checks fail instead of silently serving the fallback
+    sample record.
+    """
     try:
         with open(data_file, "r") as f:
             centers = json.load(f)
         logger.info("Loaded %d centers from %s", len(centers), data_file)
-        return centers
+        return centers, False
     except Exception as e:
-        logger.warning("Could not load centers data from %s (%s); "
-                       "serving fallback sample record", data_file, e)
-        return FALLBACK_CENTERS
+        logger.error("Could not load centers data from %s (%s); "
+                     "serving fallback sample record and reporting not ready",
+                     data_file, e)
+        return FALLBACK_CENTERS, True
+
+
+def _store_health(count, used_fallback):
+    """Readiness decision shared by both store backends."""
+    if used_fallback:
+        return {"ok": False,
+                "detail": "centers dataset failed to load; "
+                          "serving the fallback sample record",
+                "centers": count}
+    if count == 0:
+        return {"ok": False, "detail": "no centers loaded", "centers": 0}
+    return {"ok": True, "detail": "ok", "centers": count}
 
 
 def _escape_like(value):
@@ -214,6 +238,7 @@ class CenterStore:
     def __init__(self, db_file, data_file):
         self._db_file = db_file
         self._lock = threading.Lock()
+        self._used_fallback = False
         self._conn = sqlite3.connect(db_file, check_same_thread=False)
         with self._lock, self._conn:
             self._conn.execute(
@@ -231,7 +256,7 @@ class CenterStore:
             self._load(data_file)
 
     def _load(self, data_file):
-        centers = load_centers(data_file)
+        centers, self._used_fallback = load_centers(data_file)
         rows = [
             (c.get("center_id"), position, c.get("pincode"),
              c.get("district_name"), json.dumps(c))
@@ -272,6 +297,15 @@ class CenterStore:
                 return []
         return [json.loads(row[0]) for row in rows]
 
+    def health(self):
+        """Readiness for /health: DB reachable and real centers loaded."""
+        try:
+            count = self.count()
+        except Exception as e:
+            return {"ok": False, "detail": f"center store unreachable: {e}",
+                    "centers": 0}
+        return _store_health(count, self._used_fallback)
+
     def close(self):
         with self._lock:
             self._conn.close()
@@ -284,7 +318,7 @@ class InMemoryCenterStore:
     backend = "memory"
 
     def __init__(self, data_file):
-        self._centers = load_centers(data_file)
+        self._centers, self._used_fallback = load_centers(data_file)
 
     def count(self):
         return len(self._centers)
@@ -297,6 +331,10 @@ class InMemoryCenterStore:
             results = [c for c in results
                        if district in c.get("district_name", "").lower()]
         return results
+
+    def health(self):
+        """Readiness for /health: real centers loaded in memory."""
+        return _store_health(self.count(), self._used_fallback)
 
     def close(self):
         pass
@@ -432,7 +470,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Health Check Endpoint (used by AWS ALB Target Group)
+        # Health Check Endpoint (used by AWS ALB Target Group). It is a
+        # readiness check: HTTP 200 only when the node can actually serve
+        # lookups (center store reachable, real dataset loaded).
         if path == "/health":
             if self.state.is_unhealthy():
                 self._write_json({
@@ -442,15 +482,27 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                     "instance_id": instance_id,
                     "timestamp": time.time()
                 }, status_code=500)
-            else:
+                return
+            store_health = self.store.health()
+            if not store_health["ok"]:
+                logger.error("Readiness check failing: %s",
+                             store_health["detail"])
                 self._write_json({
-                    "status": "healthy",
+                    "status": "unhealthy",
+                    "reason": f"Lookup not ready: {store_health['detail']}",
                     "zone": zone,
                     "instance_id": instance_id,
-                    "uptime_seconds": self.state.uptime(),
-                    "total_requests_served": self.state.total_requests(),
                     "timestamp": time.time()
-                })
+                }, status_code=500)
+                return
+            self._write_json({
+                "status": "healthy",
+                "zone": zone,
+                "instance_id": instance_id,
+                "uptime_seconds": self.state.uptime(),
+                "total_requests_served": self.state.total_requests(),
+                "timestamp": time.time()
+            })
             return
 
         # Administrative controls to test target health transitions (supports GET and POST)
@@ -632,6 +684,7 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
         """Operational counters snapshot for monitoring and the demo."""
         by_endpoint, by_status = self.state.response_snapshot()
         limiter = self.server.rate_limiter
+        store_health = self.store.health()
         self._write_json({
             "service": "CoWIN Vaccination Center Lookup",
             "zone": self.config.zone,
@@ -644,7 +697,9 @@ class CoWINLookupHandler(BaseHTTPRequestHandler):
                                     sorted(by_status.items())},
             "store": {
                 "backend": self.store.backend,
-                "centers_loaded": self.store.count(),
+                "centers_loaded": store_health["centers"],
+                "ready": store_health["ok"],
+                "detail": store_health["detail"],
             },
             "auth": {
                 "enabled": self.config.api_key is not None,
